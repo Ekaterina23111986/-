@@ -1,0 +1,399 @@
+
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+from matplotlib.patches import FancyBboxPatch
+import numpy as np
+
+fig, ax = plt.subplots(1, 1, figsize=(22, 32))
+ax.set_xlim(0, 22)
+ax.set_ylim(0, 32)
+ax.axis('off')
+
+# Colors
+c_human = '#E3F2FD'
+c_ai = '#C8E6C9'
+c_dec = '#FFF3E0'
+c_start = '#F3E5F5'
+c_data = '#FFF8E1'
+c_warn = '#FFEBEE'
+c_ok = '#E8F5E9'
+
+bc_human = '#1976D2'
+bc_ai = '#2E7D32'
+bc_dec = '#E65100'
+bc_start = '#7B1FA2'
+bc_data = '#F9A825'
+bc_warn = '#C62828'
+bc_ok = '#2E7D32'
+
+def draw_box(ax, x, y, w, h, text, facecolor, edgecolor, fontsize=9, bold=False, italic=False, textcolor='black', align='center'):
+    box = FancyBboxPatch((x, y), w, h, boxstyle="round,pad=0.03,rounding_size=0.2",
+                         facecolor=facecolor, edgecolor=edgecolor, linewidth=2)
+    ax.add_patch(box)
+    weight = 'bold' if bold else 'normal'
+    style = 'italic' if italic else 'normal'
+    ax.text(x + w/2, y + h/2, text, ha=align, va='center', fontsize=fontsize,
+            fontweight=weight, fontstyle=style, color=textcolor, wrap=True, linespacing=1.15)
+    return box
+
+def draw_oval(ax, x, y, w, h, text, fc, ec, fs=11):
+    el = mpatches.Ellipse((x+w/2, y+h/2), w, h, facecolor=fc, edgecolor=ec, linewidth=2.5)
+    ax.add_patch(el)
+    ax.text(x+w/2, y+h/2, text, ha='center', va='center', fontsize=fs, fontweight='bold', color=ec)
+    return el
+
+def draw_diamond(ax, x, y, size, text, fc, ec, fs=9):
+    d = plt.Polygon([(x, y+size/2), (x+size/2, y+size), (x+size, y+size/2), (x+size/2, y)],
+                    facecolor=fc, edgecolor=ec, linewidth=2)
+    ax.add_patch(d)
+    ax.text(x+size/2, y+size/2, text, ha='center', va='center', fontsize=fs, fontweight='bold', wrap=True, linespacing=1.1)
+    return d
+
+def draw_data(ax, x, y, w, h, text, fc, ec, fs=9):
+    pts = [(x+0.6, y), (x+w-0.6, y), (x+w, y+h), (x, y+h)]
+    p = plt.Polygon(pts, facecolor=fc, edgecolor=ec, linewidth=2)
+    ax.add_patch(p)
+    ax.text(x+w/2, y+h/2, text, ha='center', va='center', fontsize=fs, fontstyle='italic', color='#5D4037', linespacing=1.1)
+    return p
+
+def arrow(ax, x1, y1, x2, y2, c='black', lw=1.5, ls='-'):
+    ax.annotate('', xy=(x2, y2), xytext=(x1, y1),
+                arrowprops=dict(arrowstyle='->', color=c, lw=lw, ls=ls))
+
+# ==================== TITLE ====================
+ax.text(11, 31.5, 'БЛОК-СХЕМА: Автоматизация системы закупок в медицинской организации', 
+        ha='center', fontsize=17, fontweight='bold', color='#1A237E')
+ax.text(11, 31.0, 'Процесс «КАК ДОЛЖНО БЫТЬ» (TO-BE) с участием ИИ', 
+        ha='center', fontsize=13, color='#455A64')
+
+# ==================== LEGEND ====================
+ly = 30.3
+items = [
+    (0.5, c_human, bc_human, 'Действие человека'),
+    (3.0, c_ai, bc_ai, 'Действие ИИ'),
+    (5.5, c_dec, bc_dec, 'Решение'),
+    (8.0, c_start, bc_start, 'Начало/Конец'),
+    (10.5, c_data, bc_data, 'Данные'),
+]
+for lx, fc, ec, lbl in items:
+    draw_box(ax, lx, ly, 2.3, 0.45, lbl, fc, ec, 8)
+
+ax.plot([13.0, 14.0], [ly+0.22, ly+0.22], 'k-', lw=1.5)
+ax.text(14.5, ly+0.22, 'Поток процесса', ha='left', va='center', fontsize=9)
+ax.plot([13.0, 14.0], [ly-0.15, ly-0.15], 'g--', lw=1.5)
+ax.text(14.5, ly-0.15, 'Поток данных ИИ', ha='left', va='center', fontsize=9, color='green')
+
+# ==================== AS-IS vs TO-BE PANEL ====================
+ax.add_patch(FancyBboxPatch((0.3, 28.5), 21.4, 1.5, boxstyle="round,pad=0.05", 
+                             facecolor='#ECEFF1', edgecolor='#546E7A', linewidth=1.5))
+ax.text(11, 29.7, 'СРАВНЕНИЕ: AS-IS (сейчас)  →  TO-BE (с ИИ)', ha='center', fontsize=12, fontweight='bold', color='#37474F')
+ax.text(1.0, 29.2, 'AS-IS: Медсестра тратит 4–6 часов/неделю. Скачивает 3 PDF, ищет глазами цены, переносит руками в таблицу, считает калькулятором. Ошибки до 10%. Переплата 150–300 тыс.₽/мес.', 
+        ha='left', va='center', fontsize=9, color='#B71C1C', style='italic')
+ax.text(1.0, 28.8, 'TO-BE: Открывает одну вкладку браузера. Готовая таблица от ИИ уже подсвечена цветами. Проверка аномалий — 15 минут. Экономия 10–12%.', 
+        ha='left', va='center', fontsize=9, color='#1B5E20', style='italic', fontweight='bold')
+
+# ==================== FLOWCHART ====================
+# Center column x = 8.5, width = 5.0
+
+# 1. START
+draw_oval(ax, 8.5, 27.0, 5.0, 0.8, 'НАЧАЛО\n(Новый день закупок)', c_start, bc_start, 11)
+
+# 2. Human: Open stock table
+draw_box(ax, 7.0, 25.5, 8.0, 1.0, 
+         'Медсестра-закупщик открывает облачную таблицу\nостатков на складе (Google / Яндекс Таблицы)', 
+         c_human, bc_human, 10)
+
+# 3. Data: Stock
+draw_data(ax, 7.5, 24.5, 7.0, 0.7, 
+          'ДАННЫЕ: SKU, наименование, количество,\nсрок годности, критичность (дефицит/норма)', 
+          c_data, bc_data, 9)
+
+# 4. AI: Collect supplier data
+draw_box(ax, 7.0, 22.9, 8.0, 1.3, 
+         'ИИ-АГЕНТ СБОРА ДАННЫХ:\n• Сканирует почту — извлекает PDF-вложения с прайсами\n• Парсит сайты поставщиков (HTML-таблицы цен)\n• Применяет OCR к отсканированным PDF (распознаёт текст)', 
+         c_ai, bc_ai, 9, bold=True)
+
+# 5. Data: Supplier prices
+draw_data(ax, 7.5, 21.9, 7.0, 0.7, 
+          'ДАННЫЕ: прайсы поставщиков, цены,\nусловия доставки, минимальная партия', 
+          c_data, bc_data, 9)
+
+# 6. AI: Normalize nomenclature
+draw_box(ax, 7.0, 20.3, 8.0, 1.3, 
+         'ИИ-НОРМАЛИЗАТОР НОМЕНКЛАТУРЫ:\n• Сопоставляет синонимы: «Цефтриаксон 1г №50» = «Ротацеф 1г 50фл»\n• Распознаёт аналоги и дженерики по МНН\n• Сопоставляет разные единицы измерения (шт, фл, уп)', 
+         c_ai, bc_ai, 9, bold=True)
+
+# 7. Decision: Can AI read data?
+draw_diamond(ax, 8.5, 18.8, 5.0, 'ИИ уверен\nв прочтении\nданных?', c_dec, bc_dec, 9)
+
+# 8. AI: Flag uncertain (left branch)
+draw_box(ax, 1.0, 18.0, 6.0, 1.0, 
+         'ИИ ПОДСВЕЧИВАЕТ ЖЁЛТЫМ + КОММЕНТАРИЙ:\n«Не смог прочитать срок годности в строке 45\nфайла «Медтехника_июнь.pdf». Требуется ручной ввод»', 
+         c_ai, bc_ai, 8, bold=True)
+
+# 9. Human: Verify flagged
+draw_box(ax, 1.0, 16.5, 6.0, 1.0, 
+         'Медсестра проверяет аномалии вручную\n(время: 15 минут вместо 4 часов)', 
+         c_human, bc_human, 9)
+
+# 10. AI: Calculate optimal
+draw_box(ax, 7.0, 15.5, 8.0, 1.3, 
+         'ИИ-КАЛЬКУЛЯТОР ОПТИМАЛЬНОГО ЗАКАЗА:\n• Сравнивает цены с учётом стоимости доставки\n• Рассчитывает страховой запас (не +30%, а +5–10%)\n• Выбирает оптимального поставщика по каждой позиции', 
+         c_ai, bc_ai, 9, bold=True)
+
+# 11. Data: Recommendation table
+draw_data(ax, 7.5, 14.5, 7.0, 0.7, 
+          'СВОДНАЯ ТАБЛИЦА-РЕКОМЕНДАЦИЯ:\nпозиция | поставщик | цена | экономия | срок поставки', 
+          c_data, bc_data, 9)
+
+# 12. Decision: Price anomaly?
+draw_diamond(ax, 8.5, 12.9, 5.0, 'Цена отклоняется\n>30% от средней\nпо рынку?', c_dec, bc_dec, 9)
+
+# 13. AI: Flag price anomaly (left branch)
+draw_box(ax, 1.0, 12.1, 6.0, 0.9, 
+         'ИИ: «Цена отклоняется от средней по рынку\nна 40%. Проверьте, опт это или розница»', 
+         c_ai, bc_ai, 8, bold=True)
+
+# 14. Human: Review recommendation
+draw_box(ax, 7.0, 11.0, 8.0, 1.0, 
+         'Медсестра просматривает готовую таблицу-рекомендацию:\n• Красный — цена выросла относительно прошлого заказа\n• Зелёный — найден выгодный поставщик\n• Итоговая экономия посчитана внизу таблицы', 
+         c_human, bc_human, 9)
+
+# 15. Decision: Approve?
+draw_diamond(ax, 8.5, 9.5, 5.0, 'Медсестра\nсогласна с\nрекомендацией?', c_dec, bc_dec, 9)
+
+# 16. Human: Edit if needed (left branch)
+draw_box(ax, 1.0, 8.7, 6.0, 0.9, 
+         'Медсестра вносит корректировки вручную:\nменяет поставщика, количество, сроки', 
+         c_human, bc_human, 9)
+
+# 17. AI: Generate order documents
+draw_box(ax, 7.0, 7.5, 8.0, 1.1, 
+         'ИИ ФОРМИРУЕТ ДОКУМЕНТЫ:\n• Заказ-накладная в Excel (готовый к печати)\n• Письмо поставщику (тема, текст, вложение)\n• Обновление таблицы остатков (новые данные)', 
+         c_ai, bc_ai, 9, bold=True)
+
+# 18. Human: Send order
+draw_box(ax, 7.0, 6.3, 8.0, 0.9, 
+         'Медсестра отправляет заказ поставщику\n(1 клик — email с готовым письмом и накладной)', 
+         c_human, bc_human, 10)
+
+# 19. Data: Order in system
+draw_data(ax, 7.5, 5.4, 7.0, 0.6, 
+          'Заказ в системе, ожидание поставки,\nобновление статуса в таблице', 
+          c_data, bc_data, 9)
+
+# 20. END
+draw_oval(ax, 8.5, 4.4, 5.0, 0.8, 'КОНЕЦ\n(Заказ размещён)', c_start, bc_start, 11)
+
+# ==================== ARROWS (main flow) ====================
+arrow(ax, 11, 27.0, 11, 26.5)
+arrow(ax, 11, 25.5, 11, 25.2)
+arrow(ax, 11, 24.5, 11, 24.2)
+arrow(ax, 11, 22.9, 11, 22.6)
+arrow(ax, 11, 21.9, 11, 21.6)
+arrow(ax, 11, 20.3, 11, 19.9)
+# from diamond down
+arrow(ax, 11, 18.8, 11, 18.3)
+
+# Diamond 1 branches
+ax.plot([8.5, 4.0], [19.3, 19.3], 'k-', lw=1.5)
+ax.plot([4.0, 4.0], [19.3, 19.0], 'k-', lw=1.5)
+arrow(ax, 4.0, 19.0, 4.0, 19.0)
+ax.text(5.2, 19.4, 'Нет', ha='center', va='bottom', fontsize=9, color='red', fontweight='bold')
+
+ax.plot([13.5, 17.0], [19.3, 19.3], 'k-', lw=1.5)
+ax.plot([17.0, 17.0], [19.3, 16.8], 'k-', lw=1.5)
+ax.plot([17.0, 15.0], [16.8, 16.8], 'k-', lw=1.5)
+arrow(ax, 15.0, 16.8, 15.0, 16.8)
+ax.text(15.3, 19.4, 'Да', ha='center', va='bottom', fontsize=9, color='green', fontweight='bold')
+
+# From flag back to main flow
+ax.plot([4.0, 4.0], [16.5, 16.2], 'k-', lw=1.5)
+ax.plot([4.0, 7.0], [16.2, 16.2], 'k-', lw=1.5)
+
+# From calc to data to decision
+arrow(ax, 11, 15.5, 11, 15.2)
+arrow(ax, 11, 14.5, 11, 14.1)
+
+# Diamond 2 branches
+ax.plot([8.5, 4.0], [13.4, 13.4], 'k-', lw=1.5)
+ax.plot([4.0, 4.0], [13.4, 13.0], 'k-', lw=1.5)
+arrow(ax, 4.0, 13.0, 4.0, 13.0)
+ax.text(5.2, 13.5, 'Да', ha='center', va='bottom', fontsize=9, color='red', fontweight='bold')
+
+ax.plot([13.5, 17.0], [13.4, 13.4], 'k-', lw=1.5)
+ax.plot([17.0, 17.0], [13.4, 11.5], 'k-', lw=1.5)
+ax.plot([17.0, 15.0], [11.5, 11.5], 'k-', lw=1.5)
+arrow(ax, 15.0, 11.5, 15.0, 11.5)
+ax.text(15.3, 13.5, 'Нет', ha='center', va='bottom', fontsize=9, color='green', fontweight='bold')
+
+# From price flag back
+ax.plot([4.0, 4.0], [12.1, 11.5], 'k-', lw=1.5)
+ax.plot([4.0, 7.0], [11.5, 11.5], 'k-', lw=1.5)
+
+# From review to decision
+arrow(ax, 11, 11.0, 11, 10.5)
+
+# Diamond 3 branches
+ax.plot([8.5, 4.0], [10.0, 10.0], 'k-', lw=1.5)
+ax.plot([4.0, 4.0], [10.0, 9.6], 'k-', lw=1.5)
+arrow(ax, 4.0, 9.6, 4.0, 9.6)
+ax.text(5.2, 10.1, 'Нет', ha='center', va='bottom', fontsize=9, color='red', fontweight='bold')
+
+ax.plot([13.5, 17.0], [10.0, 10.0], 'k-', lw=1.5)
+ax.plot([17.0, 17.0], [10.0, 8.6], 'k-', lw=1.5)
+ax.plot([17.0, 15.0], [8.6, 8.6], 'k-', lw=1.5)
+
+# From edit back to generate
+ax.plot([4.0, 4.0], [8.7, 8.3], 'k-', lw=1.5)
+ax.plot([4.0, 17.0], [8.3, 8.3], 'k-', lw=1.5)
+ax.plot([17.0, 17.0], [8.3, 8.6], 'k-', lw=1.5)
+
+# Continue down
+arrow(ax, 11, 9.5, 11, 8.6)
+
+# From right merge to generate
+ax.plot([15.0, 15.0], [8.6, 8.1], 'k-', lw=1.5)
+ax.plot([15.0, 11.0], [8.1, 8.1], 'k-', lw=1.5)
+
+arrow(ax, 11, 7.5, 11, 7.2)
+arrow(ax, 11, 6.3, 11, 6.0)
+arrow(ax, 11, 5.4, 11, 5.2)
+
+# ==================== DASHED DATA LINES ====================
+ax.plot([11, 14.5], [25.0, 25.0], 'g--', lw=1.2, alpha=0.6)
+ax.text(12.7, 25.2, 'данные остатков', ha='center', va='bottom', fontsize=7, color='green', alpha=0.7)
+
+ax.plot([11, 14.5], [22.5, 22.5], 'g--', lw=1.2, alpha=0.6)
+ax.text(12.7, 22.7, 'прайсы поставщиков', ha='center', va='bottom', fontsize=7, color='green', alpha=0.7)
+
+ax.plot([11, 14.5], [19.9, 19.9], 'g--', lw=1.2, alpha=0.6)
+ax.text(12.7, 20.1, 'нормализованные данные', ha='center', va='bottom', fontsize=7, color='green', alpha=0.7)
+
+ax.plot([11, 14.5], [16.2, 16.2], 'g--', lw=1.2, alpha=0.6)
+ax.text(12.7, 16.4, 'рекомендации ИИ', ha='center', va='bottom', fontsize=7, color='green', alpha=0.7)
+
+ax.plot([11, 14.5], [7.0, 7.0], 'g--', lw=1.2, alpha=0.6)
+ax.text(12.7, 7.2, 'документы заказа', ha='center', va='bottom', fontsize=7, color='green', alpha=0.7)
+
+# ==================== RIGHT SIDE INFO PANELS ====================
+# Panel 1: Data Sources
+ax.add_patch(FancyBboxPatch((15.5, 22.0), 6.0, 2.0, boxstyle="round,pad=0.05", 
+                             facecolor='#E8EAF6', edgecolor='#3949AB', linewidth=1.5))
+ax.text(18.5, 23.7, 'ИСТОЧНИКИ ДАННЫХ ДЛЯ ИИ', ha='center', fontsize=10, fontweight='bold', color='#1A237E')
+ax.text(15.7, 23.2, '• Склад: Google/Яндекс Таблицы, Excel (.xlsx, .csv)', ha='left', fontsize=8, color='#283593')
+ax.text(15.7, 22.8, '• Поставщики: PDF-прайсы (email), сайты (HTML)', ha='left', fontsize=8, color='#283593')
+ax.text(15.7, 22.4, '• Форматы: структурированные таблицы + неструктурированные PDF', ha='left', fontsize=8, color='#283593')
+
+# Panel 2: Why AI not macro
+ax.add_patch(FancyBboxPatch((15.5, 19.0), 6.0, 2.5, boxstyle="round,pad=0.05", 
+                             facecolor='#E8F5E9', edgecolor='#2E7D32', linewidth=1.5))
+ax.text(18.5, 21.2, 'ПОЧЕМУ ИИ, А НЕ МАКРОС?', ha='center', fontsize=10, fontweight='bold', color='#1B5E20')
+ax.text(15.7, 20.7, 'Макрос умеет: сложить цифры по жёсткой формуле', ha='left', fontsize=8, color='#33691E')
+ax.text(15.7, 20.3, 'Макрос НЕ умеет:', ha='left', fontsize=8, color='#33691E', fontweight='bold')
+ax.text(15.7, 19.9, '• Читать текст внутри PDF разных форматов', ha='left', fontsize=8, color='#33691E')
+ax.text(15.7, 19.5, '• Распознавать «кривые» таблицы на сайтах', ha='left', fontsize=8, color='#33691E')
+ax.text(15.7, 19.1, '• Понимать синонимы: «Цефтриаксон» = «Ротацеф»', ha='left', fontsize=8, color='#33691E')
+
+# Panel 3: AI Uncertainty handling
+ax.add_patch(FancyBboxPatch((15.5, 15.5), 6.0, 2.0, boxstyle="round,pad=0.05", 
+                             facecolor='#FFF3E0', edgecolor='#E65100', linewidth=1.5))
+ax.text(18.5, 17.2, 'ЧТО ДЕЛАЕТ ИИ ПРИ НЕУВЕРЕННОСТИ', ha='center', fontsize=10, fontweight='bold', color='#E65100')
+ax.text(15.7, 16.7, '• Подсвечивает ячейку ярко-жёлтым', ha='left', fontsize=8, color='#BF360C')
+ax.text(15.7, 16.3, '• Пишет комментарий: «Не смог прочитать срок', ha='left', fontsize=8, color='#BF360C')
+ax.text(15.7, 15.9, '  годности. Требуется ручной ввод»', ha='left', fontsize=8, color='#BF360C')
+
+# Panel 4: Output formats
+ax.add_patch(FancyBboxPatch((15.5, 12.0), 6.0, 1.8, boxstyle="round,pad=0.05", 
+                             facecolor='#FFF8E1', edgecolor='#F9A825', linewidth=1.5))
+ax.text(18.5, 13.5, 'КУДА ИИ ОТДАЁТ РЕЗУЛЬТАТ', ha='center', fontsize=10, fontweight='bold', color='#F57F17')
+ax.text(15.7, 13.0, '• Новый лист в Google/Яндекс Таблице', ha='left', fontsize=8, color='#5D4037')
+ax.text(15.7, 12.6, '• Excel-файл «Заказ-накладная» (готов к печати)', ha='left', fontsize=8, color='#5D4037')
+ax.text(15.7, 12.2, '• Email-письмо с вложением для поставщика', ha='left', fontsize=8, color='#5D4037')
+
+# Panel 5: Fallback & Monitoring
+ax.add_patch(FancyBboxPatch((15.5, 8.5), 6.0, 2.5, boxstyle="round,pad=0.05", 
+                             facecolor='#FFEBEE', edgecolor='#C62828', linewidth=1.5))
+ax.text(18.5, 10.7, 'РЕЗЕРВИРОВАНИЕ И КОНТРОЛЬ', ha='center', fontsize=10, fontweight='bold', color='#B71C1C')
+ax.text(15.7, 10.2, 'Fallback: при сбое ИИ — ручной режим', ha='left', fontsize=8, color='#B71C1C', fontweight='bold')
+ax.text(15.7, 9.8, '• Последняя таблица остаётся в истории правок', ha='left', fontsize=8, color='#B71C1C')
+ax.text(15.7, 9.4, 'Ответственный: Старшая/главная медсестра', ha='left', fontsize=8, color='#B71C1C', fontweight='bold')
+ax.text(15.7, 9.0, '• Ежедневно: просмотр логов ошибок чтения', ha='left', fontsize=8, color='#B71C1C')
+ax.text(15.7, 8.6, '• Раз в месяц: аудит 10 случайных строк вручную', ha='left', fontsize=8, color='#B71C1C')
+
+# Panel 6: Metrics
+ax.add_patch(FancyBboxPatch((15.5, 5.0), 6.0, 2.5, boxstyle="round,pad=0.05", 
+                             facecolor='#E0F2F1', edgecolor='#00897B', linewidth=1.5))
+ax.text(18.5, 7.2, 'МЕТРИКИ УСПЕХА (через 6 мес)', ha='center', fontsize=10, fontweight='bold', color='#00695C')
+ax.text(15.7, 6.7, '• Время обработки: 4–5 часов → 15 минут', ha='left', fontsize=8, color='#004D40')
+ax.text(15.7, 6.3, '• Снижение затрат: 10–12% (150–300 тыс.₽/мес)', ha='left', fontsize=8, color='#004D40')
+ax.text(15.7, 5.9, '• Снижение ошибок: 10% → <2%', ha='left', fontsize=8, color='#004D40')
+ax.text(15.7, 5.5, '• Страховой запас: 30% → 5–10%', ha='left', fontsize=8, color='#004D40')
+ax.text(15.7, 5.1, '• Освобождение ФОТ: 4–6 часов/неделю', ha='left', fontsize=8, color='#004D40')
+
+# ==================== LEFT SIDE AS-IS PANELS ====================
+# Panel: Current problems
+ax.add_patch(FancyBboxPatch((0.3, 22.0), 5.5, 2.5, boxstyle="round,pad=0.05", 
+                             facecolor='#FFEBEE', edgecolor='#C62828', linewidth=1.5))
+ax.text(3.05, 24.2, 'ПРОБЛЕМЫ AS-IS (сейчас)', ha='center', fontsize=10, fontweight='bold', color='#B71C1C')
+ax.text(0.5, 23.7, '• 4–6 часов в неделю на ручной сбор', ha='left', fontsize=8, color='#B71C1C')
+ax.text(0.5, 23.3, '• До 10% позиций заказываются с ошибкой', ha='left', fontsize=8, color='#B71C1C')
+ax.text(0.5, 22.9, '• +25–30% избыточный страховой запас', ha='left', fontsize=8, color='#B71C1C')
+ax.text(0.5, 22.5, '• 150–300 тыс.₽ переплата ежемесячно', ha='left', fontsize=8, color='#B71C1C')
+ax.text(0.5, 22.1, '• Полдня на размещение одного заказа', ha='left', fontsize=8, color='#B71C1C')
+
+# Panel: AI Components
+ax.add_patch(FancyBboxPatch((0.3, 18.5), 5.5, 2.5, boxstyle="round,pad=0.05", 
+                             facecolor='#E8F5E9', edgecolor='#2E7D32', linewidth=1.5))
+ax.text(3.05, 20.7, 'КОМПОНЕНТЫ ИИ', ha='center', fontsize=10, fontweight='bold', color='#1B5E20')
+ax.text(0.5, 20.2, '• OCR: распознавание текста из PDF', ha='left', fontsize=8, color='#33691E')
+ax.text(0.5, 19.8, '• NLP: понимание синонимов номенклатуры', ha='left', fontsize=8, color='#33691E')
+ax.text(0.5, 19.4, '• Парсинг: извлечение цен с сайтов', ha='left', fontsize=8, color='#33691E')
+ax.text(0.5, 19.0, '• Нормализация: сопоставление аналогов', ha='left', fontsize=8, color='#33691E')
+ax.text(0.5, 18.6, '• Оптимизация: выбор лучшего поставщика', ha='left', fontsize=8, color='#33691E')
+
+# Panel: Human-AI Interaction
+ax.add_patch(FancyBboxPatch((0.3, 14.5), 5.5, 2.5, boxstyle="round,pad=0.05", 
+                             facecolor='#E3F2FD', edgecolor='#1976D2', linewidth=1.5))
+ax.text(3.05, 16.7, 'ВЗАИМОДЕЙСТВИЕ ЧЕЛОВЕК ↔ ИИ', ha='center', fontsize=10, fontweight='bold', color='#1565C0')
+ax.text(0.5, 16.2, '• Человек открывает таблицу → ИИ читает', ha='left', fontsize=8, color='#0D47A1')
+ax.text(0.5, 15.8, '• ИИ подсвечивает жёлтым → человек проверяет', ha='left', fontsize=8, color='#0D47A1')
+ax.text(0.5, 15.4, '• ИИ даёт рекомендацию → человек соглашается', ha='left', fontsize=8, color='#0D47A1')
+ax.text(0.5, 15.0, '• ИИ формирует документы → человек отправляет', ha='left', fontsize=8, color='#0D47A1')
+ax.text(0.5, 14.6, '• Время человека: 15 минут (вместо 4 часов)', ha='left', fontsize=8, color='#0D47A1', fontweight='bold')
+
+# Panel: Business Effects
+ax.add_patch(FancyBboxPatch((0.3, 10.5), 5.5, 2.5, boxstyle="round,pad=0.05", 
+                             facecolor='#E0F2F1', edgecolor='#00897B', linewidth=1.5))
+ax.text(3.05, 12.7, 'ЭФФЕКТЫ ДЛЯ БИЗНЕСА', ha='center', fontsize=10, fontweight='bold', color='#00695C')
+ax.text(0.5, 12.2, '• Экономия 10–12% (150–300 тыс.₽/мес)', ha='left', fontsize=8, color='#004D40')
+ax.text(0.5, 11.8, '• Снижение страхового запаса с 30% до 5%', ha='left', fontsize=8, color='#004D40')
+ax.text(0.5, 11.4, '• Прозрачность выбора поставщика', ha='left', fontsize=8, color='#004D40')
+ax.text(0.5, 11.0, '• Снижение риска дефицита медикаментов', ha='left', fontsize=8, color='#004D40')
+ax.text(0.5, 10.6, '• Освобождение медсестры от рутины', ha='left', fontsize=8, color='#004D40')
+
+# ==================== BOTTOM BANNER ====================
+ax.add_patch(FancyBboxPatch((0.3, 2.8), 21.4, 1.3, boxstyle="round,pad=0.05", 
+                             facecolor='#E8EAF6', edgecolor='#1A237E', linewidth=2))
+ax.text(11, 3.8, 'КЛЮЧЕВЫЕ МЕТРИКИ:  Время: 4–6 часов → 15 мин  |  Экономия: 10–12% (150–300 тыс.₽/мес)  |  Точность: +90%  |  Страховой запас: 30% → 5–10%', 
+        ha='center', fontsize=11, fontweight='bold', color='#1A237E')
+ax.text(11, 3.2, 'Ответственный за ИИ: Старшая/главная медсестра  |  Аудит: 1 раз/мес (10 случайных строк)  |  Fallback: ручной режим при сбое  |  Данные: Google/Яндекс Таблицы + PDF + Email', 
+        ha='center', fontsize=9, color='#455A64')
+
+# ==================== PROJECT IDEA BANNER ====================
+ax.add_patch(FancyBboxPatch((0.3, 0.3), 21.4, 2.2, boxstyle="round,pad=0.05", 
+                             facecolor='#F3E5F5', edgecolor='#7B1FA2', linewidth=2))
+ax.text(11, 2.2, 'ИДЕЯ ПРОЕКТА: «МедЗакуп AI — интеллектуальный агент оптимизации медицинских закупок»', 
+        ha='center', fontsize=12, fontweight='bold', color='#4A148C')
+ax.text(11, 1.7, 'ЦЕЛЬ: Сократить прямые затраты на закупку минимум на 10–12% и сократить время обработки заказа с 4–5 часов до 15 минут.', 
+        ha='center', fontsize=9, color='#4A148C')
+ax.text(11, 1.3, 'РЕСУРСЫ: Данные (6–12 мес истории, прайсы, остатки) | Технологии (LLM API + OCR + парсер) | Команда (1 ML + 1 backend + 1 аналитик) | Срок (MVP 1 мес, запуск 3 мес)', 
+        ha='center', fontsize=9, color='#4A148C')
+ax.text(11, 0.7, 'ПОЧЕМУ ИИ: Обычный макрос не умеет читать PDF разных форматов, парсить «кривые» сайты и понимать, что «Цефтриаксон» и «Ротацеф» — один товар. ИИ справляется без жёстких правил.', 
+        ha='center', fontsize=9, color='#4A148C', style='italic')
+
+plt.tight_layout()
+plt.savefig('/mnt/agents/output/Задание4_БлокСхема_Полная.png', dpi=200, bbox_inches='tight', 
+            facecolor='white', edgecolor='none')
+plt.show()
+print("Полная блок-схема сохранена!")
