@@ -1,0 +1,204 @@
+ * Основная функция выдачи со склада в кабинет
+ * @param {Sheet} journalSheet - лист журнала выдачи (М или Н)
+ * @param {number} row - номер строки в журнале
+ * @param {string} type - 'M' или 'N'
+ * 
+ * Логика:
+ * - Проверяет наличие кабинета и его структуру
+ * - Списывает количество со склада (с учётом серии/срока для М, даты прихода для Н)
+ * - Записывает данные в кабинет в столбцы A-E (дата, наименование, количество, серия, срок)
+ * - Выводит уведомление и логирует действие
+ */
+function pushToCabinet_(journalSheet, row, type) {
+  var key = type + '|' + row;
+  if (_pushInProgress && _pushInProgress[key]) {
+    console.log('pushToCabinet_ уже выполняется для этой строки, пропускаем');
+    return;
+  }
+  if (!_pushInProgress) _pushInProgress = {};
+  _pushInProgress[key] = true;
+
+  try {
+    if (!journalSheet || !row || !type) {
+      console.error('pushToCabinet_: неверные параметры', { journalSheet, row, type });
+      safeAlert_('Ошибка: неверные параметры для выдачи.');
+      return;
+    }
+
+    var cabKey = journalSheet.getRange(row, type === 'M' ? COL_JM.CABINET : COL_JN.CABINET).getValue();
+    if (!cabKey) {
+      safeAlert_('Не указан кабинет!');
+      return;
+    }
+    cabKey = cabKey.toString().trim().toLowerCase();
+    console.log('pushToCabinet_: ищем кабинет "' + cabKey + '"');
+
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var sheets = ss.getSheets();
+    var targetSheet = null;
+    for (var i = 0; i < sheets.length; i++) {
+      if (sheets[i].getName().toLowerCase() === cabKey) {
+        targetSheet = sheets[i];
+        break;
+      }
+    }
+    if (!targetSheet) {
+      safeAlert_('Кабинет "' + cabKey + '" не найден!');
+      return;
+    }
+    console.log('pushToCabinet_: найден лист "' + targetSheet.getName() + '"');
+
+    var protections = targetSheet.getProtections(SpreadsheetApp.ProtectionType.SHEET);
+    if (protections.length > 0) {
+      safeAlert_('Лист "' + targetSheet.getName() + '" защищён! Добавление строк невозможно.');
+      return;
+    }
+
+    var filter = targetSheet.getFilter();
+    if (filter) {
+      console.log('pushToCabinet_: на листе включён фильтр – отключаем его');
+      filter.remove();
+      SpreadsheetApp.flush();
+    }
+
+    try {
+      targetSheet.ungroupRow(1, targetSheet.getMaxRows());
+    } catch(e) { /* игнорируем */ }
+
+    var cols = getCabinetColumns(targetSheet);
+    if (!cols || !cols.NAME || !cols.QTY) {
+      safeAlert_('Не удалось определить структуру кабинета "' + targetSheet.getName() + '". Проверьте заголовки: Дата, Наименование, Количество, Серия, Срок.');
+      console.error('pushToCabinet_: cols =', cols);
+      return;
+    }
+    console.log('pushToCabinet_: структура кабинета определена, cols =', cols);
+
+    var date, drug, qty, serial, expiry, arrivalDate;
+    if (type === 'M') {
+      date = journalSheet.getRange(row, COL_JM.DATE).getValue();
+      drug = journalSheet.getRange(row, COL_JM.NAME).getValue();
+      qty = parseFloat(journalSheet.getRange(row, COL_JM.QUANTITY).getValue()) || 0;
+      serial = journalSheet.getRange(row, COL_JM.SERIAL).getValue() || '';
+      expiry = journalSheet.getRange(row, COL_JM.EXPIRY).getValue() || '';
+      arrivalDate = null;
+    } else {
+      date = journalSheet.getRange(row, COL_JN.DATE).getValue();
+      drug = journalSheet.getRange(row, COL_JN.NAME).getValue();
+      qty = parseFloat(journalSheet.getRange(row, COL_JN.QUANTITY).getValue()) || 0;
+      serial = '';
+      expiry = '';
+      arrivalDate = journalSheet.getRange(row, COL_JN.ARRIVAL_DATE).getValue();
+    }
+
+    console.log('pushToCabinet_: препарат="' + drug + '", количество=' + qty + ', кабинет=' + targetSheet.getName());
+
+    if (!drug || qty <= 0) {
+      console.warn('pushToCabinet_: препарат не указан или количество <= 0');
+      return;
+    }
+
+    // ---------- ИСПРАВЛЕНИЕ: определяем реальную последнюю строку с данными ----------
+    function getLastDataRow(sheet) {
+      var data = sheet.getDataRange().getValues();
+      for (var i = data.length - 1; i >= 0; i--) {
+        var row = data[i];
+        var isEmpty = true;
+        for (var j = 0; j < row.length; j++) {
+          if (row[j] !== '' && row[j] !== null && row[j] !== undefined) {
+            isEmpty = false;
+            break;
+          }
+        }
+        if (!isEmpty) return i + 1;
+      }
+      return 1;
+    }
+
+    var lastRow = getLastDataRow(targetSheet);
+    if (lastRow < 1) lastRow = 1;
+    var newRow = lastRow + 1;
+
+    targetSheet.insertRowAfter(lastRow);
+    SpreadsheetApp.flush();
+    console.log('pushToCabinet_: вставлена новая строка ' + newRow + ' (после реальной последней ' + lastRow + ')');
+
+    var totalCols = targetSheet.getLastColumn();
+    if (totalCols < 1) totalCols = 10;
+
+    var rowData = new Array(totalCols);
+    for (var c = 0; c < totalCols; c++) rowData[c] = '';
+
+    if (cols.DATE && typeof cols.DATE === 'number' && cols.DATE <= totalCols) {
+      rowData[cols.DATE - 1] = date || new Date();
+    }
+    if (cols.NAME && typeof cols.NAME === 'number' && cols.NAME <= totalCols) {
+      rowData[cols.NAME - 1] = drug || '';
+    }
+    if (cols.QTY && typeof cols.QTY === 'number' && cols.QTY <= totalCols) {
+      rowData[cols.QTY - 1] = qty || 0;
+    }
+    if (cols.SERIAL && typeof cols.SERIAL === 'number' && cols.SERIAL <= totalCols) {
+      rowData[cols.SERIAL - 1] = serial || '';
+    }
+    if (cols.EXPIRY && typeof cols.EXPIRY === 'number' && cols.EXPIRY <= totalCols) {
+      rowData[cols.EXPIRY - 1] = expiry || '';
+    }
+    if (type === 'N' && arrivalDate) {
+      var headers = targetSheet.getRange(1, 1, 1, totalCols).getValues()[0];
+      var arrivalCol = null;
+      for (var h = 0; h < headers.length; h++) {
+        var header = String(headers[h]).trim().toLowerCase();
+        if (header.indexOf('дата прихода') !== -1 || header.indexOf('приход') !== -1) {
+          arrivalCol = h + 1;
+          break;
+        }
+      }
+      if (arrivalCol && arrivalCol <= totalCols) {
+        rowData[arrivalCol - 1] = arrivalDate;
+      }
+    }
+
+    console.log('pushToCabinet_: rowData = ' + JSON.stringify(rowData));
+
+    var newRowRange = targetSheet.getRange(newRow, 1, 1, totalCols);
+    newRowRange.setDataValidation(null);
+
+    if (lastRow >= 2) {
+      var sourceRange = targetSheet.getRange(lastRow, 1, 1, totalCols);
+      sourceRange.copyTo(newRowRange, SpreadsheetApp.CopyPasteType.PASTE_FORMULA, false);
+      sourceRange.copyTo(newRowRange, SpreadsheetApp.CopyPasteType.PASTE_FORMAT, false);
+      SpreadsheetApp.flush();
+      console.log('pushToCabinet_: формулы и формат скопированы из строки ' + lastRow);
+    } else {
+      console.log('pushToCabinet_: нет предыдущей строки с данными, копирование формул пропущено');
+    }
+
+    newRowRange.setValues([rowData]);
+    SpreadsheetApp.flush();
+
+    targetSheet.showRows(newRow, 1);
+    SpreadsheetApp.flush();
+    Utilities.sleep(100);
+
+    SpreadsheetApp.getActiveSpreadsheet().toast('Выдано ' + qty + ' ед. "' + drug + '" в ' + targetSheet.getName(), 'Готово', 3);
+    console.log('pushToCabinet_: успешно выдано в кабинет "' + targetSheet.getName() + '"');
+
+    if (type === 'M') {
+      recalculateStockM();
+    } else {
+      recalculateStockN();
+    }
+    recalculateCabinet(targetSheet.getName());
+
+  } catch (err) {
+    console.error('Ошибка в pushToCabinet_: ' + err.message);
+    console.error(err.stack);
+    SpreadsheetApp.getActiveSpreadsheet().toast('Ошибка: ' + err.message, 'Ошибка', 5);
+  } finally {
+    if (_pushInProgress && _pushInProgress[key]) {
+      delete _pushInProgress[key];
+    }
+  }
+}
+
+
