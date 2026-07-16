@@ -1,0 +1,3921 @@
+// ============================================================
+//  МЕДИЦИНСКИЙ СКЛАДСКОЙ УЧЁТ (Версия 7.0)
+//  Исправления: ключ списания = Наименование + Дата прихода,
+//  лист "Расход" хранит Дату прихода, оптимизация производительности
+// ============================================================
+
+// ============================================================
+//  МОДУЛЬ: Config
+// ============================================================
+
+const SHEET_STOCK_M = "Склад М";
+const SHEET_STOCK_N = "Склад Н";
+const SHEET_JOURNAL_M = "Журнал выдачи М";
+const SHEET_JOURNAL_N = "Журнал выдачи Н";
+const SHEET_DOK = "Док";
+const SHEET_ARCHIVE = "Архив";
+const SHEET_ORDERS = "Заказы";
+const SHEET_FINANCE = "Финансовый отчёт";
+const SHEET_AUDIT = "AuditLog";
+const SHEET_BACKUP = "Backup";
+
+const COL_M = { DATE:1, NAME:2, FORM:3, QTY:4, SERIAL:5, EXPIRY:6, BALANCE:7, PRICE:8, BATCH_PRICE:9, GROUP:10, SUPPLIER:11 };
+const COL_N = { DATE:1, NAME:2, FORM:3, QTY:4, BALANCE:5, PRICE:6, BATCH_PRICE:7, GROUP:8, SUPPLIER:9 };
+const COL_JM = { DATE:1, NAME:2, CABINET:3, QUANTITY:4, SERIAL:5, EXPIRY:6, INFO:10 };
+const COL_JN = { DATE:1, NAME:2, CABINET:3, QUANTITY:4, PRICE:5, ARRIVAL_DATE:6, AVAILABLE:7, INFO:9 };
+const COL_ORD = { DATE:1, CABINET:2, NAME:3, QTY:4, STATUS:5 };
+const COL_ARCH = { DATE:1, SOURCE:2, ARRIVE:3, NAME:4, FORM:5, QTY:6, SERIAL:7, EXPIRY:8, PRICE:9, GROUP:10, STATUS:11, REASON:12, CABINET:13, DOC_NO:14, WRITE_OFF_DATE:15, BASIS:16 };
+const COL_AUDIT = { TIMESTAMP:1, USER:2, ACTION:3, SHEET:4, ROW:5, COLUMN:6, OLD_VALUE:7, NEW_VALUE:8, DETAILS:9 };
+
+const CABINET_LIST = ['Процедурный','Кабинет 9','Кабинет 11','Кабинет','Администратор','Уборщик'];
+const KIT_LIST = ['Анафилактический шок','Первая помощь сотруднику','Первая помощь пациенту'];
+const EXCLUDED_CABS = ['анафилактический шок','первая помощь пациенту','первая помощь сотруднику','не указан'];
+
+const FIRST_ROW = 20;
+const CELL_DATE_START = "A3";
+const CELL_DATE_END = "B3";
+const CELL_REPORT_TYPE = "B5";
+const CELL_HORIZON = "A8";
+const CELL_ITEM = "B10";
+const CELL_GROUP = "B12";
+
+const BATCH_SIZE = 5000;
+const LOCK_TIMEOUT = 30000;
+const CACHE_TTL = 21600;
+const EXCEL_EPOCH = 25569;
+
+// Столбец "Дата прихода" в листе "Расход" — индекс 6 (1-based)
+const EXPENSE_ARRIVAL_DATE_COL = 6;
+// Количество столбцов в листе "Расход"
+const EXPENSE_COLS_COUNT = 6;
+
+let _skipNextOnEdit = false;
+let _pushInProgress = {};
+let _cache = {};
+let _cacheTimestamp = 0;
+let _lastInfoDrug = {}; // кэш для Info-панели: { sheetName: { row: drugName } }
+
+// ============================================================
+//  МОДУЛЬ: Utils
+// ============================================================
+
+function getSheet_(name) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sh = ss.getSheetByName(name);
+  if (!sh) throw new Error('Лист "' + name + '" не найден!');
+  return sh;
+}
+
+function getSheetOrNull_(name) {
+  try { return getSheet_(name); } catch(e) { return null; }
+}
+
+function readSheet_(name) {
+  return getSheet_(name).getDataRange().getValues();
+}
+
+function safeUi_() {
+  try { return SpreadsheetApp.getUi(); } catch(e) { return null; }
+}
+
+function safeAlert_(msg) {
+  const ui = safeUi_();
+  if (ui) ui.alert(msg);
+  else console.log('Alert: ' + msg);
+}
+
+function num_(v) {
+  return (typeof v === 'number' && !isNaN(v)) ? v : 0;
+}
+
+function txt_(v) {
+  return (v === null || v === undefined) ? '' : String(v).trim();
+}
+
+function normalizeStr(s) {
+  if (s === undefined || s === null) return '';
+  return String(s).replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+function normalizeDate(d) {
+  if (!d) return '';
+  var dateObj = toDateSafe_(d);
+  return dateObj ? formatDate_(dateObj) : '';
+}
+
+function inPeriod_(d, d1, d2) {
+  if (!(d instanceof Date)) return false;
+  var t = d.getTime();
+  return t >= d1.getTime() && t <= d2.getTime();
+}
+
+function formatDate_(date) {
+  if (!date) return '—';
+  if (date instanceof Date) {
+    return Utilities.formatDate(date, Session.getScriptTimeZone(), 'dd.MM.yyyy');
+  }
+  return String(date);
+}
+
+function toDateSafe_(value) {
+  if (!value) return null;
+  if (value instanceof Date && !isNaN(value.getTime())) return value;
+  if (typeof value === 'string') {
+    var trimmed = value.trim();
+    if (!trimmed) return null;
+    var d = new Date(trimmed);
+    if (!isNaN(d.getTime()) && d.getFullYear() >= 1900 && d.getFullYear() <= 2100) return d;
+    var parts = trimmed.split('.');
+    if (parts.length === 3) {
+      var day = parseInt(parts[0], 10);
+      var month = parseInt(parts[1], 10) - 1;
+      var year = parseInt(parts[2], 10);
+      if (!isNaN(day) && !isNaN(month) && !isNaN(year)) {
+        if (year < 100) year += 2000;
+        if (year >= 1900 && year <= 2100) {
+          return new Date(Date.UTC(year, month, day));
+        }
+      }
+    }
+    var num = parseFloat(trimmed.replace(',', '.'));
+    if (!isNaN(num) && num > 0 && num < 100000) {
+      return new Date((num - EXCEL_EPOCH) * 86400 * 1000);
+    }
+    return null;
+  }
+  if (typeof value === 'number' && value > 0 && value < 100000) {
+    return new Date((value - EXCEL_EPOCH) * 86400 * 1000);
+  }
+  return null;
+}
+
+function uniqueArray_(arr) {
+  var seen = {}, out = [];
+  arr.forEach(function(v) {
+    if (v && !seen[v]) { seen[v] = true; out.push(v); }
+  });
+  return out.sort(function(a,b){ return a.localeCompare(b, 'ru'); });
+}
+
+function getLastRowInColumn_(sheet, col) {
+  if (!sheet || !col) return sheet.getLastRow();
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return 1;
+  var range = sheet.getRange(2, col, Math.max(1, lastRow - 1), 1);
+  var values = range.getValues();
+  for (var i = values.length - 1; i >= 0; i--) {
+    var val = values[i][0];
+    if (val !== '' && val !== null && val !== undefined) {
+      return i + 2;
+    }
+  }
+  return 1;
+}
+
+function isCabinetSheet_(name) {
+  if (!name) return false;
+  var reserved = [SHEET_STOCK_M, SHEET_STOCK_N, SHEET_JOURNAL_M, SHEET_JOURNAL_N,
+                  SHEET_DOK, SHEET_ARCHIVE, SHEET_ORDERS, SHEET_FINANCE, SHEET_AUDIT, SHEET_BACKUP];
+  if (reserved.indexOf(name) !== -1) return false;
+  if (name.indexOf("Расход ") === 0) return false;
+  return true;
+}
+
+function isKitSheet_(name) { return KIT_LIST.indexOf(name) >= 0; }
+
+// ============================================================
+//  МОДУЛЬ: Lock
+// ============================================================
+
+function acquireLock_() {
+  var lock = LockService.getScriptLock();
+  try {
+    if (lock.tryLock(LOCK_TIMEOUT)) {
+      return lock;
+    }
+    console.warn('Не удалось получить блокировку за ' + LOCK_TIMEOUT + 'мс');
+    return null;
+  } catch(e) {
+    console.error('Ошибка блокировки: ' + e.message);
+    return null;
+  }
+}
+
+function releaseLock_(lock) {
+  try {
+    if (lock) lock.releaseLock();
+  } catch(e) {
+    console.warn('Ошибка освобождения блокировки: ' + e.message);
+  }
+}
+
+// ============================================================
+//  МОДУЛЬ: Audit
+// ============================================================
+
+function auditLog_(action, sheet, row, col, oldVal, newVal, details) {
+  try {
+    ensureAuditSheet_();
+    var auditSheet = getSheet_(SHEET_AUDIT);
+    var lastRow = auditSheet.getLastRow() + 1;
+    var user = Session.getActiveUser().getEmail() || 'unknown';
+    var timestamp = new Date();
+    auditSheet.getRange(lastRow, COL_AUDIT.TIMESTAMP).setValue(timestamp);
+    auditSheet.getRange(lastRow, COL_AUDIT.USER).setValue(user);
+    auditSheet.getRange(lastRow, COL_AUDIT.ACTION).setValue(action);
+    auditSheet.getRange(lastRow, COL_AUDIT.SHEET).setValue(sheet);
+    auditSheet.getRange(lastRow, COL_AUDIT.ROW).setValue(row);
+    auditSheet.getRange(lastRow, COL_AUDIT.COLUMN).setValue(col);
+    auditSheet.getRange(lastRow, COL_AUDIT.OLD_VALUE).setValue(String(oldVal || ''));
+    auditSheet.getRange(lastRow, COL_AUDIT.NEW_VALUE).setValue(String(newVal || ''));
+    auditSheet.getRange(lastRow, COL_AUDIT.DETAILS).setValue(details || '');
+  } catch(e) {
+    console.error('Ошибка audit log: ' + e.message);
+  }
+}
+
+function ensureAuditSheet_() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(SHEET_AUDIT);
+  if (!sheet) {
+    sheet = ss.insertSheet(SHEET_AUDIT);
+    var headers = ['Timestamp','User','Action','Sheet','Row','Column','Old Value','New Value','Details'];
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    sheet.getRange(1, 1, 1, headers.length).setFontWeight('bold').setBackground('#D9EAD3');
+    sheet.hideSheet();
+  }
+  return sheet;
+}
+
+// ============================================================
+//  МОДУЛЬ: Cache
+// ============================================================
+
+function buildIndex_(sheetName, colObj, nameCol) {
+  var cacheKey = 'idx_' + sheetName;
+  var now = Date.now();
+
+  if (_cache[cacheKey] && (now - _cacheTimestamp) < CACHE_TTL * 1000) {
+    return _cache[cacheKey];
+  }
+
+  try {
+    var props = PropertiesService.getScriptProperties();
+    var cached = props.getProperty(cacheKey);
+    if (cached) {
+      var parsed = JSON.parse(cached);
+      if (parsed.timestamp && (now - parsed.timestamp) < CACHE_TTL * 1000) {
+        _cache[cacheKey] = parsed.index;
+        _cacheTimestamp = now;
+        return parsed.index;
+      }
+    }
+  } catch(e) {
+    console.warn('Ошибка чтения кэша: ' + e.message);
+  }
+
+  var sheet = getSheet_(sheetName);
+  var data = sheet.getDataRange().getValues();
+  var index = {};
+
+  for (var i = 1; i < data.length; i++) {
+    var name = normalizeStr(data[i][nameCol - 1]);
+    if (!name) continue;
+    if (!index[name]) index[name] = [];
+    index[name].push(i + 1);
+  }
+
+  _cache[cacheKey] = index;
+  _cacheTimestamp = now;
+
+  try {
+    var props2 = PropertiesService.getScriptProperties();
+    props2.setProperty(cacheKey, JSON.stringify({timestamp: now, index: index}));
+  } catch(e) {
+    console.warn('Ошибка сохранения кэша: ' + e.message);
+  }
+
+  return index;
+}
+
+function invalidateCache_(sheetName) {
+  var cacheKey = 'idx_' + sheetName;
+  delete _cache[cacheKey];
+  try {
+    var props = PropertiesService.getScriptProperties();
+    props.deleteProperty(cacheKey);
+  } catch(e) {
+    console.warn('Ошибка удаления кэша: ' + e.message);
+  }
+}
+
+function invalidateAllCaches_() {
+  _cache = {};
+  _cacheTimestamp = 0;
+  try {
+    var props = PropertiesService.getScriptProperties();
+    var keys = props.getKeys();
+    keys.forEach(function(k) {
+      if (k.indexOf('idx_') === 0) props.deleteProperty(k);
+    });
+  } catch(e) {
+    console.warn('Ошибка очистки кэша: ' + e.message);
+  }
+}
+
+// ============================================================
+//  МОДУЛЬ: Batch
+// ============================================================
+
+function batchUpdateStockM_(sheet, issueMap) {
+  var data = sheet.getDataRange().getValues();
+  var balanceCol = COL_M.BALANCE;
+  var updates = [];
+
+  for (var i = 1; i < data.length; i++) {
+    var name = normalizeStr(data[i][COL_M.NAME-1]);
+    var serial = normalizeStr(data[i][COL_M.SERIAL-1]);
+    var expiry = normalizeDate(data[i][COL_M.EXPIRY-1]);
+    var initialQty = num_(data[i][COL_M.QTY-1]);
+    var key = name + '|' + serial + '|' + expiry;
+    var issued = issueMap[key] || 0;
+    var balance = Math.max(0, initialQty - issued);
+    updates.push([balance]);
+  }
+
+  if (updates.length > 0) {
+    sheet.getRange(2, balanceCol, updates.length, 1).setValues(updates);
+  }
+}
+
+function batchUpdateStockN_(sheet, issueMap) {
+  var data = sheet.getDataRange().getValues();
+  var balanceCol = COL_N.BALANCE;
+  var updates = [];
+
+  for (var i = 1; i < data.length; i++) {
+    var name = normalizeStr(data[i][COL_N.NAME-1]);
+    var arrivalDate = normalizeDate(data[i][COL_N.DATE-1]);
+    var initialQty = num_(data[i][COL_N.QTY-1]);
+    var key = name + '|' + arrivalDate;
+    var issued = issueMap[key] || 0;
+    var balance = Math.max(0, initialQty - issued);
+    updates.push([balance]);
+  }
+
+  if (updates.length > 0) {
+    sheet.getRange(2, balanceCol, updates.length, 1).setValues(updates);
+  }
+}
+
+/**
+ * ИСПРАВЛЕНО: ключ списания = Наименование + Дата прихода.
+ * Раньше было: Наименование + Серия + Срок → для Склада Н (нет серии/срока)
+ * все строки с одним именем получали одинаковый ключ и списание применялось ко всем.
+ */
+function batchUpdateCabinet_(sheet, writeOffMap, cols) {
+  var data = sheet.getDataRange().getValues();
+  var updates = [];
+
+  for (var i = 1; i < data.length; i++) {
+    var name = normalizeStr(data[i][cols.NAME - 1]);
+    // Ключ = Наименование + Дата прихода (столбец DATE в кабинете = "Дата прихода")
+    var arrivalDate = normalizeDate(data[i][cols.DATE - 1]);
+    var initialQty = num_(data[i][cols.QTY - 1]);
+    var key = name + '|' + arrivalDate;
+    var writtenOff = writeOffMap[key] || 0;
+    var balance = Math.max(0, initialQty - writtenOff);
+    updates.push([balance]);
+  }
+
+  if (updates.length > 0 && cols.FINAL_BALANCE) {
+    sheet.getRange(2, cols.FINAL_BALANCE, updates.length, 1).setValues(updates);
+  }
+}
+
+// ============================================================
+//  МОДУЛЬ: Stock
+// ============================================================
+
+function recalculateStockM() {
+  var lock = acquireLock_();
+  if (!lock) {
+    console.warn('recalculateStockM: не удалось получить блокировку');
+    return;
+  }
+
+  try {
+    var stockSheet = getSheet_(SHEET_STOCK_M);
+    var journalSheet = getSheet_(SHEET_JOURNAL_M);
+    var journalData = journalSheet.getDataRange().getValues();
+    var issueMap = {};
+
+    for (var i = 1; i < journalData.length; i++) {
+      var name = normalizeStr(journalData[i][COL_JM.NAME-1]);
+      var serial = normalizeStr(journalData[i][COL_JM.SERIAL-1]);
+      var expiry = normalizeDate(journalData[i][COL_JM.EXPIRY-1]);
+      var qty = num_(journalData[i][COL_JM.QUANTITY-1]);
+      if (qty <= 0) continue;
+      var key = name + '|' + serial + '|' + expiry;
+      issueMap[key] = (issueMap[key] || 0) + qty;
+    }
+
+    batchUpdateStockM_(stockSheet, issueMap);
+    invalidateCache_(SHEET_STOCK_M);
+    console.log('recalculateStockM: пересчёт завершён');
+  } catch(e) {
+    console.error('Ошибка recalculateStockM: ' + e.message);
+    auditLog_('ERROR', SHEET_STOCK_M, 0, 0, '', '', e.message);
+  } finally {
+    releaseLock_(lock);
+  }
+}
+
+function recalculateStockN() {
+  var lock = acquireLock_();
+  if (!lock) {
+    console.warn('recalculateStockN: не удалось получить блокировку');
+    return;
+  }
+
+  try {
+    var stockSheet = getSheet_(SHEET_STOCK_N);
+    var journalSheet = getSheet_(SHEET_JOURNAL_N);
+    var journalData = journalSheet.getDataRange().getValues();
+    var issueMap = {};
+
+    for (var i = 1; i < journalData.length; i++) {
+      var name = normalizeStr(journalData[i][COL_JN.NAME-1]);
+      var arrivalDate = normalizeDate(journalData[i][COL_JN.ARRIVAL_DATE-1]);
+      var qty = num_(journalData[i][COL_JN.QUANTITY-1]);
+      if (qty <= 0) continue;
+      var key = name + '|' + arrivalDate;
+      issueMap[key] = (issueMap[key] || 0) + qty;
+    }
+
+    batchUpdateStockN_(stockSheet, issueMap);
+    invalidateCache_(SHEET_STOCK_N);
+    console.log('recalculateStockN: пересчёт завершён');
+  } catch(e) {
+    console.error('Ошибка recalculateStockN: ' + e.message);
+    auditLog_('ERROR', SHEET_STOCK_N, 0, 0, '', '', e.message);
+  } finally {
+    releaseLock_(lock);
+  }
+}
+
+function getBalanceForBatchM(drug, serial, expiry) {
+  var stock = getSheet_(SHEET_STOCK_M);
+  var data = stock.getDataRange().getValues();
+  var drugNorm = normalizeStr(drug);
+  var serialNorm = normalizeStr(serial);
+  var expiryNorm = normalizeDate(expiry);
+  var totalBalance = 0;
+
+  for (var i = 1; i < data.length; i++) {
+    var name = normalizeStr(data[i][COL_M.NAME-1]);
+    if (name !== drugNorm) continue;
+    var s = normalizeStr(data[i][COL_M.SERIAL-1]);
+    if (s !== serialNorm) continue;
+    var e = normalizeDate(data[i][COL_M.EXPIRY-1]);
+    if (e !== expiryNorm) continue;
+    totalBalance += num_(data[i][COL_M.BALANCE-1]);
+  }
+  return totalBalance;
+}
+
+function getBalanceForBatchN(drug, arrivalDate) {
+  var stock = getSheet_(SHEET_STOCK_N);
+  var data = stock.getDataRange().getValues();
+  var drugNorm = normalizeStr(drug);
+  var dateNorm = normalizeDate(arrivalDate);
+  var totalBalance = 0;
+
+  for (var i = 1; i < data.length; i++) {
+    var name = normalizeStr(data[i][COL_N.NAME-1]);
+    if (name !== drugNorm) continue;
+    var d = normalizeDate(data[i][COL_N.DATE-1]);
+    if (d !== dateNorm) continue;
+    totalBalance += num_(data[i][COL_N.BALANCE-1]);
+  }
+  return totalBalance;
+}
+
+// ============================================================
+//  МОДУЛЬ: Cabinets
+// ============================================================
+
+function getCabinetColumns(sheet) {
+  if (!sheet) return {};
+  var lastCol = sheet.getLastColumn();
+  if (lastCol === 0) return {};
+  var headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  var cols = {};
+
+  for (var i = 0; i < headers.length; i++) {
+    var h = headers[i] ? String(headers[i]).trim().toLowerCase().replace(/\s+/g, ' ') : "";
+    if (h.indexOf("наименование") !== -1 || h.indexOf("название") !== -1 || h.indexOf("препарат") !== -1) {
+      cols.NAME = i+1;
+    } else if ((h.indexOf("количество") !== -1 || h.indexOf("кол-во") !== -1 || h.indexOf("колво") !== -1) && !cols.QTY) {
+      cols.QTY = i+1;
+    } else if (h.indexOf("серия") !== -1 || h.indexOf("партия") !== -1) {
+      cols.SERIAL = i+1;
+    } else if (h.indexOf("срок годности") !== -1 || h.indexOf("срок") !== -1 || h.indexOf("годен") !== -1) {
+      cols.EXPIRY = i+1;
+    } else if (h.indexOf("списать") !== -1 || h.indexOf("списание") !== -1) {
+      cols.WRITE_OFF = i+1;
+    } else if (h.indexOf("итоговый остаток") !== -1 || h.indexOf("остаток") !== -1) {
+      if (!cols.FINAL_BALANCE) cols.FINAL_BALANCE = i+1;
+    } else if (h.indexOf("дата") !== -1) {
+      // "Дата прихода" попадает сюда — это ключевой столбец для списания
+      cols.DATE = i+1;
+    } else if (h.indexOf("цена") !== -1 && !cols.PRICE) {
+      cols.PRICE = i+1;
+    }
+  }
+  return cols;
+}
+
+function recalculateCabinet(cabinetName) {
+  if (!cabinetName || !cabinetName.trim()) {
+    var activeSheet = SpreadsheetApp.getActiveSheet();
+    if (activeSheet && isCabinetSheet_(activeSheet.getName())) {
+      cabinetName = activeSheet.getName();
+    } else {
+      console.error('recalculateCabinet: имя кабинета не указано');
+      return;
+    }
+  }
+  cabinetName = cabinetName.trim();
+
+  var lock = acquireLock_();
+  if (!lock) {
+    console.warn('recalculateCabinet: не удалось получить блокировку');
+    return;
+  }
+
+  try {
+    var cabinetSheet = getSheet_(cabinetName);
+    var historySheetName = "Расход " + cabinetName;
+
+    var historySheet = null;
+    try {
+      historySheet = getSheet_(historySheetName);
+    } catch(e) {
+      console.log('Нет истории для кабинета ' + cabinetName);
+    }
+
+    var writeOffMap = {};
+
+    if (historySheet) {
+      var historyData = historySheet.getDataRange().getValues();
+      for (var i = 1; i < historyData.length; i++) {
+        var name = normalizeStr(historyData[i][1]); // Наименование
+        var qty = num_(historyData[i][4]);           // Количество
+
+        // ИСПРАВЛЕНО: читаем дату прихода из столбца 6 (индекс 5)
+        var arrivalDate = '';
+        if (historyData[i].length > 5 && historyData[i][5]) {
+          arrivalDate = normalizeDate(historyData[i][5]);
+        }
+
+        if (qty <= 0) continue;
+        // ИСПРАВЛЕНО: ключ = Наименование + Дата прихода
+        var key = name + '|' + arrivalDate;
+        writeOffMap[key] = (writeOffMap[key] || 0) + qty;
+      }
+    }
+
+    var cols = getCabinetColumns(cabinetSheet);
+    if (!cols || !cols.NAME || !cols.QTY || !cols.FINAL_BALANCE) {
+      console.error('recalculateCabinet: не удалось определить структуру кабинета ' + cabinetName);
+      return;
+    }
+
+    batchUpdateCabinet_(cabinetSheet, writeOffMap, cols);
+    invalidateCache_(cabinetName);
+    console.log('recalculateCabinet: пересчёт для "' + cabinetName + '" завершён');
+  } catch(e) {
+    console.error('Ошибка recalculateCabinet: ' + e.message);
+    auditLog_('ERROR', cabinetName, 0, 0, '', '', e.message);
+  } finally {
+    releaseLock_(lock);
+  }
+}
+
+function recalculateAllCabinets() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheets = ss.getSheets();
+  var count = 0;
+
+  for (var i = 0; i < sheets.length; i++) {
+    var name = sheets[i].getName();
+    if (isCabinetSheet_(name) || isKitSheet_(name)) {
+      try {
+        recalculateCabinet(name);
+        count++;
+      } catch(e) {
+        console.error('Ошибка пересчёта кабинета ' + name + ': ' + e.message);
+      }
+    }
+  }
+
+  console.log('recalculateAllCabinets: обновлено ' + count + ' кабинетов');
+}
+
+/**
+ * ИСПРАВЛЕНО: handleWriteOff_
+ * - Сохраняет дату прихода в лист "Расход" (6-й столбец)
+ * - Лист "Расход" теперь имеет 6 столбцов: Дата, Наименование, Серия, Срок, Количество, Дата прихода
+ * - Явная валидация: qty > 0, qty <= finalBalance, arrivalDate существует
+ */
+function handleWriteOff_(sheet, row, value, cabinetName, col) {
+  if (!cabinetName || !cabinetName.trim()) {
+    cabinetName = sheet.getName();
+  }
+
+  var qty;
+  if (typeof value === 'number') {
+    qty = value;
+  } else {
+    var strVal = String(value).replace(',', '.').replace(/\s/g, '');
+    qty = parseFloat(strVal);
+  }
+
+  if (isNaN(qty) || qty <= 0) {
+    safeAlert_('Введите положительное число.');
+    if (col) sheet.getRange(row, col).clearContent();
+    return;
+  }
+
+  var cols = getCabinetColumns(sheet);
+  if (!cols || !cols.NAME || !cols.QTY || !cols.FINAL_BALANCE) {
+    safeAlert_('Не удалось определить структуру кабинета.');
+    if (col) sheet.getRange(row, col).clearContent();
+    return;
+  }
+
+  var name = sheet.getRange(row, cols.NAME).getValue();
+  if (!name) {
+    safeAlert_('Нет наименования.');
+    if (col) sheet.getRange(row, col).clearContent();
+    return;
+  }
+
+  var finalBalance = num_(sheet.getRange(row, cols.FINAL_BALANCE).getValue());
+  if (qty > finalBalance) {
+    safeAlert_('Недостаточно остатка! Доступно: ' + finalBalance);
+    if (col) sheet.getRange(row, col).clearContent();
+    return;
+  }
+
+  var serial = cols.SERIAL ? String(sheet.getRange(row, cols.SERIAL).getValue() || '').trim() : '';
+  var expiry = cols.EXPIRY ? sheet.getRange(row, cols.EXPIRY).getValue() : '';
+  if (typeof expiry === 'string') expiry = expiry.trim();
+  var dateVal = cols.DATE ? sheet.getRange(row, cols.DATE).getValue() : new Date();
+  // Дата прихода — ключевой столбец для списания
+  var arrivalDate = cols.DATE ? sheet.getRange(row, cols.DATE).getValue() : new Date();
+  if (!(dateVal instanceof Date)) dateVal = new Date();
+
+  // Создаём/получаем лист истории
+  var historyName = "Расход " + cabinetName;
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var historySheet = ss.getSheetByName(historyName);
+
+  if (!historySheet) {
+    historySheet = ss.insertSheet(historyName);
+    // ИСПРАВЛЕНО: 6 столбцов — добавлен "Дата прихода"
+    historySheet.getRange(1,1,1,EXPENSE_COLS_COUNT).setValues(
+      [['Дата','Наименование','Серия','Срок','Количество','Дата прихода']]
+    );
+    historySheet.getRange(1,1,1,EXPENSE_COLS_COUNT).setFontWeight('bold');
+    historySheet.hideSheet();
+  }
+
+  // Миграция: если лист старого формата (5 столбцов), расширяем до 6
+  if (historySheet.getLastColumn() < EXPENSE_COLS_COUNT) {
+    historySheet.getRange(1, EXPENSE_COLS_COUNT).setValue('Дата прихода').setFontWeight('bold');
+  }
+
+  auditLog_('WRITE_OFF', cabinetName, row, col, finalBalance, finalBalance - qty,
+    'Списано ' + qty + ' ед. "' + name + '", серия: ' + serial);
+
+  // ИСПРАВЛЕНО: сохраняем дату прихода в 6-й столбец
+  historySheet.appendRow([dateVal, name.trim(), serial, expiry, qty, arrivalDate]);
+
+  if (col) sheet.getRange(row, col).clearContent();
+
+  recalculateCabinet(cabinetName);
+
+  if (finalBalance - qty === 0) {
+    addToOrders_(cabinetName, txt_(name), 0);
+  }
+
+  SpreadsheetApp.getActiveSpreadsheet().toast('Списано ' + qty + ' ед. "' + name + '"', 'Готово', 3);
+}
+
+// ============================================================
+//  МОДУЛЬ: Archive
+// ============================================================
+
+function archiveStockRow_(sheet, row, stockType) {
+  if (row <= 0 || (stockType !== 'M' && stockType !== 'N')) {
+    console.error('archiveStockRow_: неверные параметры');
+    return;
+  }
+
+  var cols = (stockType === 'M') ? COL_M : COL_N;
+  var name = sheet.getRange(row, cols.NAME).getValue();
+  var serial = (stockType === 'M') ? (sheet.getRange(row, COL_M.SERIAL).getValue() || '') : '-';
+  if (!name) return;
+
+  var arch = getSheet_(SHEET_ARCHIVE);
+  var now = new Date();
+  var todayStr = formatDate_(now);
+
+  // Проверка дубля
+  var aData = arch.getDataRange().getValues();
+  for (var i = 1; i < aData.length; i++) {
+    var archDate = aData[i][COL_ARCH.DATE-1] instanceof Date ? formatDate_(aData[i][COL_ARCH.DATE-1]) : '';
+    var archName = txt_(aData[i][COL_ARCH.NAME-1]);
+    var archSerial = txt_(aData[i][COL_ARCH.SERIAL-1]);
+    var archStatus = txt_(aData[i][COL_ARCH.STATUS-1]);
+
+    if (archName === txt_(name) && archSerial === serial &&
+        archStatus === 'Обычный' && archDate === todayStr) {
+      console.log('archiveStockRow_: дубль для "' + name + '", пропускаем');
+      return;
+    }
+  }
+
+  var last = arch.getLastRow() + 1;
+  var rowData = [
+    now,
+    stockType === 'M' ? 'Склад М' : 'Склад Н',
+    sheet.getRange(row, cols.DATE).getValue(),
+    name,
+    sheet.getRange(row, cols.FORM).getValue(),
+    sheet.getRange(row, cols.QTY).getValue(),
+    serial,
+    stockType === 'M' ? (sheet.getRange(row, COL_M.EXPIRY).getValue() || '-') : '-',
+    sheet.getRange(row, cols.PRICE).getValue() || 0,
+    sheet.getRange(row, cols.GROUP).getValue(),
+    'Обычный',
+    'Остаток = 0 или просрочен',
+    '-',
+    '-',
+    '-',
+    '-'
+  ];
+
+  arch.getRange(last, 1, 1, rowData.length).setValues([rowData]);
+  arch.getRange(last, 1, 1, rowData.length).setBackground('#DCFFDC');
+
+  auditLog_('ARCHIVE', stockType === 'M' ? SHEET_STOCK_M : SHEET_STOCK_N, row, 0, '', '',
+    'Архивировано: ' + name + ', серия: ' + serial);
+}
+
+function archiveRow_(data) {
+  var arch = getSheet_(SHEET_ARCHIVE);
+  var last = arch.getLastRow() + 1;
+  var rowData = [
+    new Date(),
+    data.source || 'Кабинет',
+    data.date || '',
+    data.drug || '',
+    data.form || '',
+    data.qty || 0,
+    data.serial || '',
+    data.exp || '',
+    data.price || 0,
+    data.group || '',
+    data.status || 'списано',
+    data.reason || '',
+    data.cabinet || '',
+    '-',
+    '-',
+    '-'
+  ];
+  arch.getRange(last, 1, 1, rowData.length).setValues([rowData]);
+}
+
+function archiveZeroBalances() {
+  var lock = acquireLock_();
+  if (!lock) {
+    safeAlert_('Не удалось получить блокировку. Попробуйте позже.');
+    return;
+  }
+
+  try {
+    var sheets = [SHEET_STOCK_M, SHEET_STOCK_N];
+    sheets.forEach(function(sheetName) {
+      var sh = getSheet_(sheetName);
+      var isM = (sheetName === SHEET_STOCK_M);
+      var cols = isM ? COL_M : COL_N;
+      var data = sh.getDataRange().getValues();
+      var rowsToDelete = [];
+
+      for (var i = 1; i < data.length; i++) {
+        var bal = num_(data[i][cols.BALANCE-1]);
+        if (bal === 0) {
+          archiveStockRow_(sh, i+1, isM ? 'M' : 'N');
+          rowsToDelete.push(i+1);
+        }
+      }
+
+      // Удаление реверсом — O(n) вместо O(n^2)
+      rowsToDelete.sort(function(a,b){return b-a;});
+      for (var j = 0; j < rowsToDelete.length; j++) {
+        sh.deleteRow(rowsToDelete[j]);
+      }
+    });
+
+    recalculateStockM();
+    recalculateStockN();
+    safeAlert_('Архивация нулевых остатков завершена.');
+  } catch(e) {
+    console.error('Ошибка archiveZeroBalances: ' + e.message);
+    auditLog_('ERROR', 'ARCHIVE', 0, 0, '', '', e.message);
+  } finally {
+    releaseLock_(lock);
+  }
+}
+
+function archiveExpiredItems() {
+  var lock = acquireLock_();
+  if (!lock) {
+    safeAlert_('Не удалось получить блокировку. Попробуйте позже.');
+    return;
+  }
+
+  try {
+    var stock = getSheet_(SHEET_STOCK_M);
+    var data = stock.getDataRange().getValues();
+    var today = new Date(); today.setHours(0,0,0,0);
+    var rowsToDelete = [];
+
+    for (var i = 1; i < data.length; i++) {
+      var exp = data[i][COL_M.EXPIRY-1];
+      if (!(exp instanceof Date)) continue;
+      if (exp < today) {
+        archiveStockRow_(stock, i+1, 'M');
+        rowsToDelete.push(i+1);
+      }
+    }
+
+    rowsToDelete.sort(function(a,b){return b-a;});
+    for (var j = 0; j < rowsToDelete.length; j++) {
+      stock.deleteRow(rowsToDelete[j]);
+    }
+
+    safeAlert_('Архивировано ' + rowsToDelete.length + ' просроченных позиций.');
+  } catch(e) {
+    console.error('Ошибка archiveExpiredItems: ' + e.message);
+    auditLog_('ERROR', SHEET_STOCK_M, 0, 0, '', '', e.message);
+  } finally {
+    releaseLock_(lock);
+  }
+}
+
+function archiveZeroCabinetRows() {
+  var lock = acquireLock_();
+  if (!lock) {
+    safeAlert_('Не удалось получить блокировку. Попробуйте позже.');
+    return;
+  }
+
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var sheets = ss.getSheets();
+
+    for (var i = 0; i < sheets.length; i++) {
+      var name = sheets[i].getName();
+      if (isCabinetSheet_(name) || isKitSheet_(name)) {
+        var sh = sheets[i];
+        var cols = getCabinetColumns(sh);
+        if (!cols || !cols.NAME || !cols.FINAL_BALANCE) continue;
+        var data = sh.getDataRange().getValues();
+        var rowsToDelete = [];
+
+        for (var r = 1; r < data.length; r++) {
+          var bal = num_(data[r][cols.FINAL_BALANCE-1]);
+          if (bal === 0) {
+            var drug = data[r][cols.NAME-1];
+            var serial = data[r][cols.SERIAL-1] || '';
+            var expiry = data[r][cols.EXPIRY-1] || '';
+            var arrivalDate = data[r][cols.DATE-1] || '';
+            archiveRow_({
+              source: name,
+              date: data[r][cols.DATE-1] || '',
+              drug: drug,
+              form: '',
+              qty: num_(data[r][cols.QTY-1]),
+              serial: serial,
+              exp: expiry,
+              price: num_(data[r][cols.PRICE-1]),
+              group: '',
+              status: 'списано',
+              reason: 'Обнуление остатка в кабинете',
+              cabinet: name
+            });
+            rowsToDelete.push(r+1);
+          }
+        }
+
+        rowsToDelete.sort(function(a,b){return b-a;});
+        for (var j = 0; j < rowsToDelete.length; j++) {
+          sh.deleteRow(rowsToDelete[j]);
+        }
+      }
+    }
+
+    recalculateAllCabinets();
+    safeAlert_('Архивация нулевых остатков в кабинетах завершена.');
+  } catch(e) {
+    console.error('Ошибка archiveZeroCabinetRows: ' + e.message);
+    auditLog_('ERROR', 'CABINETS', 0, 0, '', '', e.message);
+  } finally {
+    releaseLock_(lock);
+  }
+}
+
+function cleanArchiveMemory() {
+  var lock = acquireLock_();
+  if (!lock) {
+    safeAlert_('Не удалось получить блокировку. Попробуйте позже.');
+    return;
+  }
+
+  try {
+    var arch = getSheet_(SHEET_ARCHIVE);
+    var data = arch.getDataRange().getValues();
+    var rowsToDelete = [];
+    var seen = {};
+
+    for (var i = 1; i < data.length; i++) {
+      var name = txt_(data[i][COL_ARCH.NAME-1]);
+      var serial = txt_(data[i][COL_ARCH.SERIAL-1]);
+      var date = data[i][COL_ARCH.DATE-1] instanceof Date ? formatDate_(data[i][COL_ARCH.DATE-1]) : '';
+      var status = txt_(data[i][COL_ARCH.STATUS-1]);
+      var key = name + '|' + serial + '|' + date + '|' + status;
+
+      if (seen[key]) {
+        rowsToDelete.push(i+1);
+      } else {
+        seen[key] = true;
+      }
+    }
+
+    rowsToDelete.sort(function(a,b){return b-a;});
+    for (var j = 0; j < rowsToDelete.length; j++) {
+      arch.deleteRow(rowsToDelete[j]);
+    }
+
+    safeAlert_('Архив очищен. Удалено дублей: ' + rowsToDelete.length);
+  } catch(e) {
+    console.error('Ошибка cleanArchiveMemory: ' + e.message);
+    auditLog_('ERROR', SHEET_ARCHIVE, 0, 0, '', '', e.message);
+  } finally {
+    releaseLock_(lock);
+  }
+}
+
+function clearArchive() {
+  var ui = safeUi_();
+  if (!ui) return;
+  var resp = ui.alert('Очистка архива', 'Удалить все записи в архиве?', ui.ButtonSet.YES_NO);
+  if (resp !== ui.Button.YES) return;
+
+  var arch = getSheet_(SHEET_ARCHIVE);
+  var lastRow = arch.getLastRow();
+  if (lastRow >= 2) {
+    arch.getRange(2, 1, lastRow - 1, arch.getLastColumn()).clearContent();
+    arch.getRange(2, 1, lastRow - 1, arch.getLastColumn()).clearDataValidations();
+  }
+
+  auditLog_('CLEAR_ARCHIVE', SHEET_ARCHIVE, 0, 0, '', '', 'Полная очистка архива');
+  safeAlert_('Архив полностью очищен.');
+}
+
+function deleteFromArchive() {
+  var sheet = SpreadsheetApp.getActiveSheet();
+  if (sheet.getName() !== SHEET_ARCHIVE) {
+    SpreadsheetApp.getUi().alert('Выберите строку на листе "Архив"!');
+    return;
+  }
+  var row = sheet.getActiveCell().getRow();
+  if (row < 2) {
+    SpreadsheetApp.getUi().alert('Выберите строку с данными (не заголовок)!');
+    return;
+  }
+
+  var ui = SpreadsheetApp.getUi();
+  var response = ui.alert('Удалить из архива', 'Удалить выбранную запись?', ui.ButtonSet.YES_NO);
+  if (response !== ui.Button.YES) return;
+
+  auditLog_('DELETE_FROM_ARCHIVE', SHEET_ARCHIVE, row, 0, '', '', 'Удаление записи из архива');
+  sheet.deleteRow(row);
+  ui.alert('Запись удалена из архива.');
+}
+
+function markAsUtilized() {
+  var sheet = SpreadsheetApp.getActiveSheet();
+  if (sheet.getName() !== SHEET_ARCHIVE) {
+    SpreadsheetApp.getUi().alert('Выберите строку на листе "Архив"!');
+    return;
+  }
+  var row = sheet.getActiveCell().getRow();
+  if (row < 2) {
+    SpreadsheetApp.getUi().alert('Выберите строку с данными!');
+    return;
+  }
+
+  var ui = SpreadsheetApp.getUi();
+  var response = ui.alert('Утилизация', 'Отметить как утилизированную?', ui.ButtonSet.YES_NO);
+  if (response !== ui.Button.YES) return;
+
+  sheet.getRange(row, COL_ARCH.STATUS).setValue('Утилизировано');
+  sheet.getRange(row, COL_ARCH.REASON).setValue('Утилизировано ' + formatDate_(new Date()));
+  sheet.getRange(row, COL_ARCH.WRITE_OFF_DATE).setValue(new Date());
+  sheet.getRange(row, COL_ARCH.WRITE_OFF_DATE).setNumberFormat('dd.mm.yyyy');
+
+  auditLog_('UTILIZE', SHEET_ARCHIVE, row, 0, '', '', 'Утилизация записи');
+  ui.alert('Запись отмечена как утилизированная.');
+}
+
+function returnFromArchive() {
+  var sheet = SpreadsheetApp.getActiveSheet();
+  if (sheet.getName() !== SHEET_ARCHIVE) {
+    SpreadsheetApp.getUi().alert('Выберите строку на листе "Архив"!');
+    return;
+  }
+  var row = sheet.getActiveCell().getRow();
+  if (row < 2) {
+    SpreadsheetApp.getUi().alert('Выберите строку с данными!');
+    return;
+  }
+
+  var ui = SpreadsheetApp.getUi();
+  var response = ui.alert('Вернуть из архива', 'Восстановить выбранную запись?', ui.ButtonSet.YES_NO);
+  if (response !== ui.Button.YES) return;
+
+  var data = sheet.getRange(row, 1, 1, sheet.getLastColumn()).getValues()[0];
+  var source = txt_(data[COL_ARCH.SOURCE-1]);
+  var name = txt_(data[COL_ARCH.NAME-1]);
+  var form = txt_(data[COL_ARCH.FORM-1]);
+  var qty = num_(data[COL_ARCH.QTY-1]);
+  var serial = txt_(data[COL_ARCH.SERIAL-1]);
+  var expiry = data[COL_ARCH.EXPIRY-1];
+  var price = num_(data[COL_ARCH.PRICE-1]);
+  var group = txt_(data[COL_ARCH.GROUP-1]);
+  var arriveDate = data[COL_ARCH.ARRIVE-1];
+  var cabinetName = txt_(data[COL_ARCH.CABINET-1]);
+
+  if (!name || qty <= 0) {
+    ui.alert('Ошибка: недостаточно данных для восстановления.');
+    return;
+  }
+
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  if (source === 'Склад М' || source === 'Склад Н') {
+    var stockSheetName = (source === 'Склад М') ? SHEET_STOCK_M : SHEET_STOCK_N;
+    var stockSheet = ss.getSheetByName(stockSheetName);
+    if (!stockSheet) {
+      ui.alert('Лист "' + stockSheetName + '" не найден!');
+      return;
+    }
+
+    var cols = (source === 'Склад М') ? COL_M : COL_N;
+    var rowData = [];
+    var lastCol = stockSheet.getLastColumn();
+    for (var i = 0; i < lastCol; i++) rowData.push('');
+    rowData[cols.DATE - 1] = arriveDate || new Date();
+    rowData[cols.NAME - 1] = name;
+    if (cols.FORM) rowData[cols.FORM - 1] = form;
+    rowData[cols.QTY - 1] = qty;
+    if (cols.SERIAL) rowData[cols.SERIAL - 1] = serial;
+    if (cols.EXPIRY) rowData[cols.EXPIRY - 1] = expiry;
+    rowData[cols.PRICE - 1] = price;
+    if (cols.GROUP) rowData[cols.GROUP - 1] = group;
+
+    stockSheet.appendRow(rowData);
+    ui.alert('Препарат "' + name + '" восстановлен на склад "' + source + '".');
+
+    if (source === 'Склад М') recalculateStockM();
+    else recalculateStockN();
+
+  } else if (source === 'Кабинет' && cabinetName) {
+    var targetSheet = ss.getSheetByName(cabinetName);
+    if (!targetSheet) {
+      ui.alert('Кабинет "' + cabinetName + '" не найден!');
+      return;
+    }
+
+    var cabCols = getCabinetColumns(targetSheet);
+    if (!cabCols || !cabCols.NAME || !cabCols.QTY) {
+      ui.alert('Не удалось определить структуру кабинета.');
+      return;
+    }
+
+    var cabRowData = [];
+    var cabLastCol = targetSheet.getLastColumn();
+    for (var k = 0; k < cabLastCol; k++) cabRowData.push('');
+    cabRowData[cabCols.DATE - 1] = arriveDate || new Date();
+    cabRowData[cabCols.NAME - 1] = name;
+    cabRowData[cabCols.QTY - 1] = qty;
+    if (cabCols.SERIAL) cabRowData[cabCols.SERIAL - 1] = serial;
+    if (cabCols.EXPIRY) cabRowData[cabCols.EXPIRY - 1] = expiry;
+    if (cabCols.PRICE) cabRowData[cabCols.PRICE - 1] = price;
+
+    targetSheet.appendRow(cabRowData);
+    ui.alert('Препарат "' + name + '" восстановлен в кабинет "' + cabinetName + '".');
+    recalculateCabinet(cabinetName);
+  } else {
+    ui.alert('Неизвестный источник или кабинет не указан.');
+    return;
+  }
+
+  var deleteResponse = ui.alert('Удалить запись из архива?', 'После восстановления удалить из архива?', ui.ButtonSet.YES_NO);
+  if (deleteResponse === ui.Button.YES) {
+    auditLog_('RESTORE_AND_DELETE', SHEET_ARCHIVE, row, 0, '', '', 'Восстановление и удаление из архива');
+    sheet.deleteRow(row);
+    ui.alert('Запись удалена из архива.');
+  } else {
+    auditLog_('RESTORE', SHEET_ARCHIVE, row, 0, '', '', 'Восстановление из архива');
+    sheet.getRange(row, COL_ARCH.STATUS).setValue('Восстановлено');
+    sheet.getRange(row, COL_ARCH.REASON).setValue('Восстановлено ' + formatDate_(new Date()));
+  }
+}
+
+// ============================================================
+//  МОДУЛЬ: Orders
+// ============================================================
+
+function addToOrders_(cabinet, name, qty) {
+  if (!cabinet || !name) {
+    console.warn('addToOrders_: пропущен вызов');
+    return false;
+  }
+
+  var orders = getSheet_(SHEET_ORDERS);
+  var data = orders.getDataRange().getValues();
+  var cabinetNorm = txt_(cabinet);
+  var nameNorm = txt_(name);
+
+  for (var i = 1; i < data.length; i++) {
+    var ordCabinet = txt_(data[i][COL_ORD.CABINET - 1]);
+    var ordName = txt_(data[i][COL_ORD.NAME - 1]);
+    var ordStatus = txt_(data[i][COL_ORD.STATUS - 1]).toLowerCase();
+
+    if (ordCabinet === cabinetNorm && ordName === nameNorm) {
+      if (ordStatus !== 'выполнен' && ordStatus !== 'отменен' && ordStatus !== 'закрыт') {
+        console.log('addToOrders_: активная заявка уже существует');
+        return false;
+      }
+    }
+  }
+
+  orders.appendRow([new Date(), cabinetNorm, nameNorm, qty || 0, 'Требуется заказ']);
+  auditLog_('ORDER_CREATED', SHEET_ORDERS, 0, 0, '', '',
+    'Заявка: ' + nameNorm + ' в ' + cabinetNorm);
+  return true;
+}
+
+function generateOrders() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheets = ss.getSheets();
+  var count = 0;
+
+  for (var i = 0; i < sheets.length; i++) {
+    var sheet = sheets[i];
+    var name = sheet.getName();
+    if (!isCabinetSheet_(name) && !isKitSheet_(name)) continue;
+
+    var cols = getCabinetColumns(sheet);
+    if (!cols || !cols.NAME || !cols.FINAL_BALANCE) continue;
+
+    var data = sheet.getDataRange().getValues();
+    for (var r = 1; r < data.length; r++) {
+      var drug = txt_(data[r][cols.NAME - 1]);
+      if (!drug) continue;
+      var balance = num_(data[r][cols.FINAL_BALANCE - 1]);
+      if (balance === 0) {
+        if (addToOrders_(name, drug, 0)) {
+          count++;
+        }
+      }
+    }
+  }
+
+  SpreadsheetApp.getActiveSpreadsheet().toast('Сформировано ' + count + ' заявок.', 'Заказы', 3);
+  safeAlert_('Сформировано ' + count + ' заявок на закупку.');
+}
+
+function createOrderSheet_() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(SHEET_ORDERS);
+  if (!sheet) {
+    sheet = ss.insertSheet(SHEET_ORDERS);
+    var headers = ["Дата", "Кабинет", "Наименование", "Количество", "Статус"];
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    sheet.getRange(1, 1, 1, headers.length).setFontWeight('bold').setBackground('#D9EAD3');
+    sheet.autoResizeColumns(1, headers.length);
+  }
+  return sheet;
+}
+
+// ============================================================
+//  МОДУЛЬ: Dictionary
+// ============================================================
+
+function rebuildDictionaries() {
+  var lock = acquireLock_();
+  if (!lock) {
+    safeAlert_('Не удалось получить блокировку. Попробуйте позже.');
+    return;
+  }
+
+  try {
+    removeStockValidations();
+    var doc = getSheet_(SHEET_DOK);
+    if (!doc) { safeAlert_('Лист "Док" не найден!'); return; }
+    var lastRow = doc.getLastRow();
+    if (lastRow >= 2) {
+      doc.getRange(2, 6, lastRow - 1, 4).clear({contentsOnly: true});
+    }
+    buildUniqueColumn_(doc, 1, 6);
+    buildUniqueColumn_(doc, 5, 7);
+    buildUniqueColumn_(doc, 6, 8);
+    buildUniqueColumn_(doc, 7, 9);
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    setNamedRange_(ss, 'СПР_Наименования', doc, 6);
+    setNamedRange_(ss, 'СПР_Группы', doc, 7);
+    setNamedRange_(ss, 'СПР_Формы', doc, 8);
+    setNamedRange_(ss, 'СПР_Поставщики', doc, 9);
+    updateNameDropdownsM();
+    updateNameDropdownsN();
+    updateCabinetList();
+    safeAlert_('Справочник и списки обновлены.');
+  } catch (e) {
+    console.error('Ошибка в rebuildDictionaries: ' + e.message);
+    safeAlert_('Ошибка: ' + e.message);
+  } finally {
+    releaseLock_(lock);
+  }
+}
+
+function buildUniqueColumn_(sh, srcCol, dstCol) {
+  var last = sh.getLastRow();
+  var seen = {};
+  var out = [];
+  if (last >= 2) {
+    var vals = sh.getRange(2, srcCol, last - 1, 1).getValues();
+    for (var i = 0; i < vals.length; i++) {
+      var v = String(vals[i][0]).trim();
+      if (v && !seen[v]) { seen[v] = true; out.push([v]); }
+    }
+  }
+  sh.getRange(2, dstCol, Math.max(sh.getMaxRows()-1,1), 1).clearContent();
+  if (out.length) sh.getRange(2, dstCol, out.length, 1).setValues(out);
+  sh.getRange(1, dstCol).setValue('Справочник');
+}
+
+function setNamedRange_(ss, name, sh, col) {
+  var last = Math.max(sh.getLastRow(), 2);
+  var range = sh.getRange(2, col, last - 1, 1);
+  var existing = ss.getRangeByName(name);
+  if (existing) ss.removeNamedRange(name);
+  ss.setNamedRange(name, range);
+}
+
+function updateDictionary_(name) {
+  if (!name) return;
+  var doc = getSheet_(SHEET_DOK);
+  if (!doc) return;
+  var data = doc.getDataRange().getValues();
+  for (var i = 1; i < data.length; i++) {
+    if (data[i][0] === name) return;
+  }
+  var last = doc.getLastRow() + 1;
+  doc.getRange(last, 1).setValue(name);
+  doc.getRange(last, 2).setValue('Новая запись');
+  doc.getRange(last, 3).setValue(new Date());
+  updateNameDropdownsM();
+  updateNameDropdownsN();
+}
+
+function getNamesFromStockM_() {
+  var names = [];
+  try {
+    var sh = getSheet_(SHEET_STOCK_M);
+    if (!sh) return names;
+    var lastRow = sh.getLastRow();
+    if (lastRow < 2) return names;
+    var vals = sh.getRange(2, COL_M.NAME, lastRow-1, 1).getValues();
+    for (var i=0; i<vals.length; i++) {
+      var n = String(vals[i][0]).trim();
+      if (n) names.push(n);
+    }
+  } catch(e) { console.warn('Ошибка чтения Склада М: ' + e.message); }
+  return uniqueArray_(names);
+}
+
+function getNamesFromStockN_() {
+  var names = [];
+  try {
+    var sh = getSheet_(SHEET_STOCK_N);
+    if (!sh) return names;
+    var lastRow = sh.getLastRow();
+    if (lastRow < 2) return names;
+    var vals = sh.getRange(2, COL_N.NAME, lastRow-1, 1).getValues();
+    for (var i=0; i<vals.length; i++) {
+      var n = String(vals[i][0]).trim();
+      if (n) names.push(n);
+    }
+  } catch(e) { console.warn('Ошибка чтения Склада Н: ' + e.message); }
+  return uniqueArray_(names);
+}
+
+function updateNameDropdownsM() {
+  try {
+    var names = getNamesFromStockM_();
+    var journal = getSheet_(SHEET_JOURNAL_M);
+    if (!journal) return;
+    var lastRow = journal.getLastRow();
+    if (lastRow < 2) return;
+    var range = journal.getRange(2, COL_JM.NAME, lastRow - 1, 1);
+    range.setDataValidation(null);
+    if (names.length > 0) {
+      var rule = SpreadsheetApp.newDataValidation()
+        .requireValueInList(names, true)
+        .setAllowInvalid(false)
+        .build();
+      range.setDataValidation(rule);
+    }
+  } catch(e) { console.warn('Ошибка обновления списка М: ' + e.message); }
+}
+
+function updateNameDropdownsN() {
+  try {
+    var names = getNamesFromStockN_();
+    var journal = getSheet_(SHEET_JOURNAL_N);
+    if (!journal) return;
+    var lastRow = journal.getLastRow();
+    if (lastRow < 2) return;
+    var range = journal.getRange(2, COL_JN.NAME, lastRow - 1, 1);
+    range.setDataValidation(null);
+    if (names.length > 0) {
+      var rule = SpreadsheetApp.newDataValidation()
+        .requireValueInList(names, true)
+        .setAllowInvalid(true)
+        .build();
+      range.setDataValidation(rule);
+    }
+  } catch(e) { console.warn('Ошибка обновления списка Н: ' + e.message); }
+}
+
+function updateCabinetList() {
+  try {
+    var cabinetList = ['Процедурный','Кабинет 9','Кабинет 11','Кабинет','Администратор','Уборщик','Анафилактический шок','Первая помощь пациенту','Первая помощь сотруднику'];
+    var doc = getSheet_(SHEET_DOK);
+    if (!doc) return;
+    var lastRow = doc.getLastRow();
+    if (lastRow >= 2) {
+      doc.getRange(2, 10, lastRow - 1, 1).clearContent();
+    }
+    if (cabinetList.length > 0) {
+      var data = cabinetList.map(function(c){ return [c]; });
+      doc.getRange(2, 10, data.length, 1).setValues(data);
+    }
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var range = doc.getRange(2, 10, cabinetList.length, 1);
+    var existing = ss.getRangeByName('CabinetList');
+    if (existing) ss.removeNamedRange('CabinetList');
+    ss.setNamedRange('CabinetList', range);
+  } catch(e) { console.warn('Ошибка обновления списка кабинетов: ' + e.message); }
+}
+
+function autoFillGroup_(sheet, row, name, colObj) {
+  if (!name) return;
+  var doc = getSheet_(SHEET_DOK);
+  if (!doc) return;
+  var data = doc.getDataRange().getValues();
+  var groupCell = sheet.getRange(row, colObj.GROUP);
+  if (groupCell.getValue()) return;
+  for (var i = 1; i < data.length; i++) {
+    if (data[i][0] && data[i][0].toString().toLowerCase().trim() === name.toLowerCase().trim()) {
+      if (data[i][4]) { groupCell.setValue(data[i][4]); break; }
+    }
+  }
+}
+
+function autoFillForm_(sheet, row, name, colObj) {
+  if (!name) return;
+  var doc = getSheet_(SHEET_DOK);
+  if (!doc) return;
+  var data = doc.getDataRange().getValues();
+  var formCell = sheet.getRange(row, colObj.FORM);
+  if (formCell.getValue()) return;
+  for (var i = 1; i < data.length; i++) {
+    if (data[i][0] && data[i][0].toString().toLowerCase().trim() === name.toLowerCase().trim()) {
+      if (data[i][5]) { formCell.setValue(data[i][5]); break; }
+    }
+  }
+}
+
+function autoFillSupplier_(sheet, row, name, colObj) {
+  if (!name) return;
+  var doc = getSheet_(SHEET_DOK);
+  if (!doc) return;
+  var data = doc.getDataRange().getValues();
+  var supCell = sheet.getRange(row, colObj.SUPPLIER);
+  if (supCell.getValue()) return;
+  for (var i = 1; i < data.length; i++) {
+    if (data[i][0] && data[i][0].toString().toLowerCase().trim() === name.toLowerCase().trim()) {
+      if (data[i][6]) { supCell.setValue(data[i][6]); break; }
+    }
+  }
+}
+
+function saveFormMapping_(sheet, row, form, colObj) {
+  if (!form) return;
+  var name = sheet.getRange(row, colObj.NAME).getValue();
+  if (!name) return;
+  var doc = getSheet_(SHEET_DOK);
+  if (!doc) return;
+  var data = doc.getDataRange().getValues();
+  for (var i = 1; i < data.length; i++) {
+    if (data[i][0] && data[i][0].toString().toLowerCase().trim() === name.toLowerCase().trim()) {
+      doc.getRange(i+1, 5).setValue(form);
+      return;
+    }
+  }
+  var last = doc.getLastRow() + 1;
+  doc.getRange(last, 1).setValue(name);
+  doc.getRange(last, 5).setValue(form);
+}
+
+function saveGroupMapping_(sheet, row, group, colObj) {
+  if (!group) return;
+  var name = sheet.getRange(row, colObj.NAME).getValue();
+  if (!name) return;
+  var doc = getSheet_(SHEET_DOK);
+  if (!doc) return;
+  var data = doc.getDataRange().getValues();
+  for (var i = 1; i < data.length; i++) {
+    if (data[i][0] && data[i][0].toString().toLowerCase().trim() === name.toLowerCase().trim()) {
+      doc.getRange(i+1, 4).setValue(group);
+      return;
+    }
+  }
+  var last = doc.getLastRow() + 1;
+  doc.getRange(last, 1).setValue(name);
+  doc.getRange(last, 4).setValue(group);
+}
+
+function saveSupplierMapping_(sheet, row, supplier, colObj) {
+  if (!supplier) return;
+  var name = sheet.getRange(row, colObj.NAME).getValue();
+  if (!name) return;
+  var doc = getSheet_(SHEET_DOK);
+  if (!doc) return;
+  var data = doc.getDataRange().getValues();
+  for (var i = 1; i < data.length; i++) {
+    if (data[i][0] && data[i][0].toString().toLowerCase().trim() === name.toLowerCase().trim()) {
+      doc.getRange(i+1, 6).setValue(supplier);
+      return;
+    }
+  }
+  var last = doc.getLastRow() + 1;
+  doc.getRange(last, 1).setValue(name);
+  doc.getRange(last, 6).setValue(supplier);
+}
+
+// ============================================================
+//  МОДУЛЬ: Journals
+// ============================================================
+
+function fillJournalMData_(sheet, row, drug) {
+  if (!sheet || !row || !drug) return;
+  var batches = getBatchesM_(drug);
+  if (batches.length === 0) {
+    sheet.getRange(row, COL_JM.SERIAL).clearContent();
+    sheet.getRange(row, COL_JM.EXPIRY).clearContent();
+    sheet.getRange(row, COL_JM.QUANTITY).clearContent();
+    return;
+  }
+  var serials = [];
+  var hasNoSerial = false;
+  batches.forEach(function(b) {
+    if (b.serial) {
+      if (serials.indexOf(b.serial) === -1) serials.push(b.serial);
+    } else {
+      hasNoSerial = true;
+    }
+  });
+  var list = serials.slice();
+  if (hasNoSerial) list.push('без серии');
+  clearDataValidation(sheet, row, COL_JM.SERIAL);
+  if (list.length) setDataValidationList(sheet, row, COL_JM.SERIAL, list);
+  sheet.getRange(row, COL_JM.EXPIRY).clearContent();
+  sheet.getRange(row, COL_JM.QUANTITY).clearContent();
+}
+
+function validateJournalMQty_(sheet, row) {
+  var rawQty = sheet.getRange(row, COL_JM.QUANTITY).getValue();
+  var qty = parseFloat(String(rawQty).replace(',', '.'));
+  if (isNaN(qty) || qty <= 0) {
+    showInfoOnSheetM(sheet, row);
+    return false;
+  }
+
+  var drug = sheet.getRange(row, COL_JM.NAME).getValue();
+  if (!drug) {
+    showInfoOnSheetM(sheet, row);
+    return false;
+  }
+
+  var serial = sheet.getRange(row, COL_JM.SERIAL).getValue();
+  var expiry = sheet.getRange(row, COL_JM.EXPIRY).getValue();
+  var avail = getBalanceForBatchM(drug, serial, expiry);
+
+  if (qty - avail > 0.001) {
+    safeAlert_('Недостаточно остатка! Доступно: ' + avail);
+    showInfoOnSheetM(sheet, row);
+    return false;
+  }
+
+  return true;
+}
+
+function getBatchesM_(drug) {
+  if (!drug) return [];
+  var batches = [];
+  var stock = getSheet_(SHEET_STOCK_M);
+  if (!stock) return batches;
+  var data = stock.getDataRange().getValues();
+  var drugNorm = normalizeStr(drug);
+
+  for (var i = 1; i < data.length; i++) {
+    var nameStock = normalizeStr(data[i][COL_M.NAME-1]);
+    if (nameStock !== drugNorm) continue;
+    var rest = num_(data[i][COL_M.BALANCE-1]);
+    if (rest <= 0) continue;
+    var serial = normalizeStr(data[i][COL_M.SERIAL-1]);
+    var expiry = normalizeDate(data[i][COL_M.EXPIRY-1]);
+    batches.push({
+      serial: serial,
+      expiry: expiry,
+      date: data[i][COL_M.DATE-1],
+      price: data[i][COL_M.PRICE-1] || 0,
+      rest: rest
+    });
+  }
+  return batches;
+}
+
+function getBatchesN_(drug, dateStr) {
+  if (!drug) return [];
+  var batches = [];
+  var stock = getSheet_(SHEET_STOCK_N);
+  if (!stock) return batches;
+  var data = stock.getDataRange().getValues();
+  var drugNorm = normalizeStr(drug);
+  var dateNorm = dateStr ? normalizeDate(dateStr) : '';
+
+  for (var i = 1; i < data.length; i++) {
+    var nameStock = normalizeStr(data[i][COL_N.NAME-1]);
+    if (nameStock !== drugNorm) continue;
+    var rest = num_(data[i][COL_N.BALANCE-1]);
+    if (rest <= 0) continue;
+    var d = normalizeDate(data[i][COL_N.DATE-1]);
+    if (dateNorm && d !== dateNorm) continue;
+    batches.push({
+      date: d,
+      price: data[i][COL_N.PRICE-1] || 0,
+      rest: rest
+    });
+  }
+  return batches;
+}
+
+function processSerialChoice_(sheet, row, choice, batches) {
+  sheet.getRange(row, COL_JM.EXPIRY).clearContent();
+  sheet.getRange(row, COL_JM.QUANTITY).clearContent();
+
+  if (choice === 'без серии') {
+    sheet.getRange(row, COL_JM.SERIAL).setValue('');
+    var noSerial = batches.filter(function(b) { return b.serial === ''; });
+    if (noSerial.length === 0) return;
+    var expirySet = {};
+    noSerial.forEach(function(b) {
+      var key = b.expiry || 'без срока';
+      expirySet[key] = true;
+    });
+    var list = Object.keys(expirySet);
+    clearDataValidation(sheet, row, COL_JM.EXPIRY);
+    if (list.length) setDataValidationList(sheet, row, COL_JM.EXPIRY, list);
+  } else {
+    var serialStr = String(choice).trim();
+    sheet.getRange(row, COL_JM.SERIAL).setValue(serialStr);
+    var matched = batches.find(function(b) { return b.serial === normalizeStr(choice); });
+    if (matched) {
+      sheet.getRange(row, COL_JM.EXPIRY).setValue(matched.expiry || '');
+    } else {
+      sheet.getRange(row, COL_JM.EXPIRY).clearContent();
+    }
+    clearDataValidation(sheet, row, COL_JM.EXPIRY);
+  }
+}
+
+function processExpiryChoice_(sheet, row, choice, batches) {
+  sheet.getRange(row, COL_JM.QUANTITY).clearContent();
+  var noSerial = batches.filter(function(b) { return b.serial === ''; });
+  var matched = null;
+  if (choice === 'без срока') {
+    var emptyExpiry = noSerial.filter(function(b) { return b.expiry === ''; });
+    if (emptyExpiry.length) {
+      emptyExpiry.sort(function(a,b) { return a.date.getTime() - b.date.getTime(); });
+      matched = emptyExpiry[0];
+    }
+  } else {
+    matched = noSerial.find(function(b) {
+      return b.expiry && formatDate_(b.expiry) === choice;
+    });
+  }
+  if (matched) {
+    sheet.getRange(row, COL_JM.EXPIRY).setValue(choice === 'без срока' ? '' : choice);
+  }
+}
+
+function fillJournalNData_(sheet, row, drug) {
+  if (!drug) return;
+  var batches = [];
+  var stock = getSheet_(SHEET_STOCK_N);
+  if (!stock) return;
+  var data = stock.getDataRange().getValues();
+
+  for (var i = 1; i < data.length; i++) {
+    if (String(data[i][COL_N.NAME-1]).trim() === drug) {
+      var rest = num_(data[i][COL_N.BALANCE-1]);
+      if (rest > 0) {
+        batches.push({
+          date: data[i][COL_N.DATE-1],
+          price: data[i][COL_N.PRICE-1] || 0,
+          rest: rest
+        });
+      }
+    }
+  }
+
+  if (batches.length === 0) {
+    sheet.getRange(row, COL_JN.PRICE).clearContent();
+    sheet.getRange(row, COL_JN.ARRIVAL_DATE).clearContent();
+    sheet.getRange(row, COL_JN.AVAILABLE).clearContent();
+    return;
+  }
+
+  var list = batches.map(function(b) { return formatDate_(b.date); });
+  var uniqueDates = [];
+  var seen = {};
+  list.forEach(function(d) {
+    if (!seen[d]) { seen[d] = true; uniqueDates.push(d); }
+  });
+  clearDataValidation(sheet, row, COL_JN.ARRIVAL_DATE);
+  if (uniqueDates.length) setDataValidationList(sheet, row, COL_JN.ARRIVAL_DATE, uniqueDates);
+  var first = batches[0];
+  sheet.getRange(row, COL_JN.ARRIVAL_DATE).setValue(first.date);
+  sheet.getRange(row, COL_JN.PRICE).setValue(first.price);
+  updateAvailableN_(sheet, row);
+}
+
+function updateAvailableN_(sheet, row) {
+  var drug = sheet.getRange(row, COL_JN.NAME).getValue();
+  var date = sheet.getRange(row, COL_JN.ARRIVAL_DATE).getValue();
+  if (!drug) { sheet.getRange(row, COL_JN.AVAILABLE).clearContent(); return; }
+  var dateStr = date ? normalizeDate(date) : '';
+  var batches = getBatchesN_(drug, dateStr);
+  var avail = 0;
+  for (var i = 0; i < batches.length; i++) {
+    avail += batches[i].rest;
+  }
+  sheet.getRange(row, COL_JN.AVAILABLE).setValue(avail);
+}
+
+function validateJournalNQty_(sheet, row) {
+  var rawQty = sheet.getRange(row, COL_JN.QUANTITY).getValue();
+  var qty = parseFloat(String(rawQty).replace(',', '.'));
+  if (isNaN(qty) || qty <= 0) {
+    showInfoOnSheetN(sheet, row);
+    return false;
+  }
+
+  var drug = sheet.getRange(row, COL_JN.NAME).getValue();
+  if (!drug) {
+    showInfoOnSheetN(sheet, row);
+    return false;
+  }
+
+  var arrivalDate = sheet.getRange(row, COL_JN.ARRIVAL_DATE).getValue();
+  if (!arrivalDate) {
+    safeAlert_('Не выбрана дата прихода!');
+    showInfoOnSheetN(sheet, row);
+    return false;
+  }
+
+  var avail = getBalanceForBatchN(drug, arrivalDate);
+
+  if (qty - avail > 0.001) {
+    safeAlert_('Недостаточно остатка! Доступно: ' + avail);
+    showInfoOnSheetN(sheet, row);
+    return false;
+  }
+
+  return true;
+}
+
+function undoIssueM() { undoIssue_('M'); }
+function undoIssueN() { undoIssue_('N'); }
+
+function undoIssue_(type) {
+  var sheetName = (type === 'M') ? SHEET_JOURNAL_M : SHEET_JOURNAL_N;
+  var sheet = SpreadsheetApp.getActiveSheet();
+  if (sheet.getName() !== sheetName) {
+    SpreadsheetApp.getUi().alert('Выберите строку на листе "' + sheetName + '"!');
+    return;
+  }
+  var row = sheet.getActiveCell().getRow();
+  if (row < 2) {
+    SpreadsheetApp.getUi().alert('Выберите строку с данными (не заголовок)!');
+    return;
+  }
+
+  var ui = SpreadsheetApp.getUi();
+  var response = ui.alert('Отменить выдачу', 'Отменить выдачу в строке ' + row + '?', ui.ButtonSet.YES_NO);
+  if (response !== ui.Button.YES) return;
+
+  auditLog_('UNDO_ISSUE', sheetName, row, 0, '', '', 'Отмена выдачи');
+  sheet.deleteRow(row);
+
+  if (type === 'M') recalculateStockM();
+  else recalculateStockN();
+
+  ui.alert('Выдача отменена. Остаток на складе пересчитан.');
+}
+
+// ============================================================
+//  МОДУЛЬ: PushToCabinet
+// ============================================================
+
+function pushToCabinet_(journalSheet, row, type) {
+  var key = type + '|' + row;
+  if (_pushInProgress && _pushInProgress[key]) {
+    console.log('pushToCabinet_ уже выполняется, пропускаем');
+    return;
+  }
+  if (!_pushInProgress) _pushInProgress = {};
+  _pushInProgress[key] = true;
+
+  try {
+    if (!journalSheet || !row || !type) {
+      console.error('pushToCabinet_: неверные параметры');
+      safeAlert_('Ошибка: неверные параметры для выдачи.');
+      return;
+    }
+
+    var cabKey = journalSheet.getRange(row, type === 'M' ? COL_JM.CABINET : COL_JN.CABINET).getValue();
+    if (!cabKey) {
+      safeAlert_('Не указан кабинет!');
+      return;
+    }
+
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var sheets = ss.getSheets();
+    var targetSheet = null;
+    for (var i = 0; i < sheets.length; i++) {
+      if (sheets[i].getName().toLowerCase() === cabKey.toString().trim().toLowerCase()) {
+        targetSheet = sheets[i];
+        break;
+      }
+    }
+    if (!targetSheet) {
+      safeAlert_('Кабинет "' + cabKey + '" не найден!');
+      return;
+    }
+
+    var protections = targetSheet.getProtections(SpreadsheetApp.ProtectionType.SHEET);
+    if (protections.length > 0) {
+      safeAlert_('Лист "' + targetSheet.getName() + '" защищён!');
+      return;
+    }
+
+    // ИСПРАВЛЕНО: НЕ удаляем фильтр — работаем через insertRowAfter
+    var cols = getCabinetColumns(targetSheet);
+    if (!cols || !cols.NAME || !cols.QTY) {
+      safeAlert_('Не удалось определить структуру кабинета.');
+      return;
+    }
+
+    var date, drug, qty, serial, expiry, arrivalDate;
+    if (type === 'M') {
+      date = journalSheet.getRange(row, COL_JM.DATE).getValue();
+      drug = journalSheet.getRange(row, COL_JM.NAME).getValue();
+      qty = num_(journalSheet.getRange(row, COL_JM.QUANTITY).getValue());
+      serial = journalSheet.getRange(row, COL_JM.SERIAL).getValue() || '';
+      expiry = journalSheet.getRange(row, COL_JM.EXPIRY).getValue() || '';
+      arrivalDate = null;
+    } else {
+      date = journalSheet.getRange(row, COL_JN.DATE).getValue();
+      drug = journalSheet.getRange(row, COL_JN.NAME).getValue();
+      qty = num_(journalSheet.getRange(row, COL_JN.QUANTITY).getValue());
+      serial = '';
+      expiry = '';
+      arrivalDate = journalSheet.getRange(row, COL_JN.ARRIVAL_DATE).getValue();
+    }
+
+    if (!drug || qty <= 0) return;
+
+    var lastRow = getLastRowInColumn_(targetSheet, cols.NAME);
+    var newRow = lastRow + 1;
+    targetSheet.insertRowAfter(lastRow);
+
+    var totalCols = targetSheet.getLastColumn();
+    var rowData = new Array(totalCols);
+    for (var c = 0; c < totalCols; c++) rowData[c] = '';
+
+    if (cols.DATE && typeof cols.DATE === 'number' && cols.DATE <= totalCols) {
+      rowData[cols.DATE - 1] = date || new Date();
+    }
+    if (cols.NAME && typeof cols.NAME === 'number' && cols.NAME <= totalCols) {
+      rowData[cols.NAME - 1] = drug || '';
+    }
+    if (cols.QTY && typeof cols.QTY === 'number' && cols.QTY <= totalCols) {
+      rowData[cols.QTY - 1] = qty || 0;
+    }
+    if (cols.SERIAL && typeof cols.SERIAL === 'number' && cols.SERIAL <= totalCols) {
+      rowData[cols.SERIAL - 1] = serial || '';
+    }
+    if (cols.EXPIRY && typeof cols.EXPIRY === 'number' && cols.EXPIRY <= totalCols) {
+      rowData[cols.EXPIRY - 1] = expiry || '';
+    }
+    if (type === 'N' && arrivalDate) {
+      var headers = targetSheet.getRange(1, 1, 1, totalCols).getValues()[0];
+      var arrivalCol = null;
+      for (var h = 0; h < headers.length; h++) {
+        var header = String(headers[h]).trim().toLowerCase();
+        if (header.indexOf('дата прихода') !== -1 || header.indexOf('приход') !== -1) {
+          arrivalCol = h + 1;
+          break;
+        }
+      }
+      if (arrivalCol && arrivalCol <= totalCols) {
+        rowData[arrivalCol - 1] = arrivalDate;
+      }
+    }
+
+    var newRowRange = targetSheet.getRange(newRow, 1, 1, totalCols);
+    newRowRange.setDataValidation(null);
+
+    if (lastRow >= 2) {
+      var sourceRange = targetSheet.getRange(lastRow, 1, 1, totalCols);
+      sourceRange.copyTo(newRowRange, SpreadsheetApp.CopyPasteType.PASTE_FORMULA, false);
+      sourceRange.copyTo(newRowRange, SpreadsheetApp.CopyPasteType.PASTE_FORMAT, false);
+    }
+
+    newRowRange.setValues([rowData]);
+    targetSheet.showRows(newRow, 1);
+
+    auditLog_('PUSH_TO_CABINET', targetSheet.getName(), newRow, 0, '', qty,
+      'Выдача ' + drug + ' из ' + (type === 'M' ? 'Склада М' : 'Склада Н'));
+
+    SpreadsheetApp.getActiveSpreadsheet().toast('Выдано ' + qty + ' ед. "' + drug + '" в ' + targetSheet.getName(), 'Готово', 3);
+
+    if (type === 'M') recalculateStockM();
+    else recalculateStockN();
+    recalculateCabinet(targetSheet.getName());
+
+  } catch (err) {
+    console.error('Ошибка в pushToCabinet_: ' + err.message);
+    SpreadsheetApp.getActiveSpreadsheet().toast('Ошибка: ' + err.message, 'Ошибка', 5);
+  } finally {
+    if (_pushInProgress && _pushInProgress[key]) {
+      delete _pushInProgress[key];
+    }
+  }
+}
+
+// ============================================================
+//  МОДУЛЬ: Reports
+// ============================================================
+
+function priceFor_(name) {
+  var sum=0, cnt=0;
+  var m = getSheet_(SHEET_STOCK_M).getDataRange().getValues();
+  for (var i=1; i<m.length; i++) {
+    if (txt_(m[i][COL_M.NAME-1]) === name) {
+      var p = num_(m[i][COL_M.PRICE-1]);
+      if (p>0) { sum += p; cnt++; }
+    }
+  }
+  var n = getSheet_(SHEET_STOCK_N).getDataRange().getValues();
+  for (var i=1; i<n.length; i++) {
+    if (txt_(n[i][COL_N.NAME-1]) === name) {
+      var p = num_(n[i][COL_N.PRICE-1]);
+      if (p>0) { sum += p; cnt++; }
+    }
+  }
+  return cnt ? sum/cnt : 0;
+}
+
+function groupFor_(name) {
+  var doc = getSheet_(SHEET_DOK).getDataRange().getValues();
+  for (var i=1; i<doc.length; i++) {
+    if (txt_(doc[i][0]) === name) return txt_(doc[i][4]);
+  }
+  return '';
+}
+
+function formFor_(name) {
+  var doc = getSheet_(SHEET_DOK).getDataRange().getValues();
+  for (var i=1; i<doc.length; i++) {
+    if (txt_(doc[i][0]) === name) return txt_(doc[i][5]);
+  }
+  return '';
+}
+
+function getIssuePriceM_(name, serial, expiry) {
+  if (!name) return 0;
+  var stock = getSheet_(SHEET_STOCK_M);
+  var data = stock.getDataRange().getValues();
+  var nameNorm = normalizeStr(name);
+  var serialNorm = normalizeStr(serial);
+  var expiryNorm = normalizeDate(expiry);
+  for (var i = 1; i < data.length; i++) {
+    if (normalizeStr(data[i][COL_M.NAME-1]) === nameNorm &&
+        normalizeStr(data[i][COL_M.SERIAL-1]) === serialNorm &&
+        normalizeDate(data[i][COL_M.EXPIRY-1]) === expiryNorm) {
+      return num_(data[i][COL_M.PRICE-1]);
+    }
+  }
+  return 0;
+}
+
+function getIssuePriceN_(name, arrivalDate) {
+  if (!name || !arrivalDate) return 0;
+  var stock = getSheet_(SHEET_STOCK_N);
+  var data = stock.getDataRange().getValues();
+  var nameNorm = normalizeStr(name);
+  var dateNorm = normalizeDate(arrivalDate);
+  for (var i = 1; i < data.length; i++) {
+    if (normalizeStr(data[i][COL_N.NAME-1]) === nameNorm &&
+        normalizeDate(data[i][COL_N.DATE-1]) === dateNorm) {
+      return num_(data[i][COL_N.PRICE-1]);
+    }
+  }
+  return 0;
+}
+
+function avgIssuePrice_(name, d1, d2) {
+  var sum=0, cnt=0;
+  var jm = getSheet_(SHEET_JOURNAL_M).getDataRange().getValues();
+  for (var i=1; i<jm.length; i++) {
+    if (inPeriod_(jm[i][COL_JM.DATE-1], d1, d2) && txt_(jm[i][COL_JM.NAME-1]) === name) {
+      var p = getIssuePriceM_(name, jm[i][COL_JM.SERIAL-1], jm[i][COL_JM.EXPIRY-1]);
+      if (p>0) { sum += p; cnt++; }
+    }
+  }
+  var jn = getSheet_(SHEET_JOURNAL_N).getDataRange().getValues();
+  for (var i=1; i<jn.length; i++) {
+    if (inPeriod_(jn[i][COL_JN.DATE-1], d1, d2) && txt_(jn[i][COL_JN.NAME-1]) === name) {
+      var p = num_(jn[i][COL_JN.PRICE-1]);
+      if (p>0) { sum += p; cnt++; }
+    }
+  }
+  return cnt ? sum/cnt : 0;
+}
+
+function writeBlock_(sheet, startRow, matrix) {
+  if (!matrix || !matrix.length) return startRow;
+  var rng = sheet.getRange(startRow, 1, matrix.length, matrix[0].length);
+  rng.setValues(matrix);
+  rng.setBorder(true, true, true, true, true, true);
+  return startRow + matrix.length;
+}
+
+function buildChart_(sheet, labelRange, valueRanges, title, opts) {
+  opts = opts || {};
+  var chartType = opts.type || 'column';
+  var pos = opts.position || {row: 2, col: 10};
+  var width = opts.width || 700;
+  var height = opts.height || 400;
+
+  var builder = sheet.newChart();
+  if (chartType === 'pie') builder = builder.asPieChart();
+  else if (chartType === 'bar') builder = builder.asBarChart();
+  else if (chartType === 'line') builder = builder.asLineChart();
+  else builder = builder.asColumnChart();
+
+  builder.addRange(labelRange);
+  valueRanges.forEach(function(r) { builder.addRange(r); });
+
+  var chart = builder
+    .setPosition(pos.row, pos.col, 0, 0)
+    .setOption('title', title)
+    .setOption('width', width)
+    .setOption('height', height)
+    .setOption('legend', {position: valueRanges.length > 1 ? 'top' : 'none'})
+    .setOption('pieSliceText', 'percentage')
+    .setOption('sliceVisibilityThreshold', 0.02)
+    .build();
+  sheet.insertChart(chart);
+}
+
+function clearReportArea_() {
+  var sh = getSheet_(SHEET_FINANCE);
+  if (!sh) return;
+  var last = sh.getLastRow();
+  if (last >= FIRST_ROW) {
+    sh.getRange(FIRST_ROW, 1, last - FIRST_ROW + 1, 50)
+      .clear({contentsOnly: true, formatOnly: true});
+  }
+  sh.getCharts().forEach(function(c) { sh.removeChart(c); });
+}
+
+/**
+ * Отчёт: Прогноз расхода
+ * Учитывает: поступления → выдачи → списания, текущий остаток, дефицит
+ */
+function forecast_(d1, d2, horizon, filterGroup) {
+  var sh = getSheet_(SHEET_FINANCE);
+  if (!horizon || horizon < 1) horizon = 1;
+  if (horizon > 12) horizon = 12;
+  filterGroup = filterGroup ? txt_(filterGroup).toLowerCase() : '';
+
+  var months = Math.max(1,
+    (d2.getFullYear() - d1.getFullYear()) * 12 + (d2.getMonth() - d1.getMonth()) + 1);
+
+  var received = {};
+  var issued = {};
+  var spent = {};
+  var currentStock = {};
+
+  // 1. Поступления на склад М и Н
+  var stockM = readSheet_(SHEET_STOCK_M);
+  for (var i = 1; i < stockM.length; i++) {
+    var r = stockM[i];
+    if (!inPeriod_(r[COL_M.DATE-1], d1, d2)) continue;
+    var nm = txt_(r[COL_M.NAME-1]); if (!nm) continue;
+    var q = num_(r[COL_M.QTY-1]), p = num_(r[COL_M.PRICE-1]);
+    if (q <= 0) continue;
+    if (!received[nm]) received[nm] = [0, 0, 0];
+    received[nm][0] += q;
+    received[nm][1] += q * p;
+    if (p > received[nm][2]) received[nm][2] = p;
+  }
+
+  var stockN = readSheet_(SHEET_STOCK_N);
+  for (var i = 1; i < stockN.length; i++) {
+    var r = stockN[i];
+    if (!inPeriod_(r[COL_N.DATE-1], d1, d2)) continue;
+    var nm = txt_(r[COL_N.NAME-1]); if (!nm) continue;
+    var q = num_(r[COL_N.QTY-1]), p = num_(r[COL_N.PRICE-1]);
+    if (q <= 0) continue;
+    if (!received[nm]) received[nm] = [0, 0, 0];
+    received[nm][0] += q;
+    received[nm][1] += q * p;
+    if (p > received[nm][2]) received[nm][2] = p;
+  }
+
+  // 2. Выдачи из журналов М и Н
+  var addIssue = function(data, C, type) {
+    for (var i = 1; i < data.length; i++) {
+      var r = data[i];
+      if (!inPeriod_(r[C.DATE-1], d1, d2)) continue;
+      var nm = txt_(r[C.NAME-1]); if (!nm) continue;
+      var q = num_(r[C.QUANTITY-1]);
+      if (q <= 0) continue;
+      var p = 0;
+      if (type === 'M') {
+        p = getIssuePriceM_(nm, r[C.SERIAL-1], r[C.EXPIRY-1]);
+      } else {
+        p = num_(r[C.PRICE-1]);
+      }
+      if (!issued[nm]) issued[nm] = [0, 0];
+      issued[nm][0] += q;
+      issued[nm][1] += q * p;
+    }
+  };
+  addIssue(readSheet_(SHEET_JOURNAL_M), COL_JM, 'M');
+  addIssue(readSheet_(SHEET_JOURNAL_N), COL_JN, 'N');
+
+  // 3. Списания из кабинетов (листы «Расход XXX»)
+  var sheets = SpreadsheetApp.getActiveSpreadsheet().getSheets();
+  for (var s = 0; s < sheets.length; s++) {
+    var ws = sheets[s];
+    var nm = ws.getName();
+    if (nm.indexOf('Расход ') !== 0) continue;
+    var data = ws.getDataRange().getValues();
+    for (var i = 1; i < data.length; i++) {
+      var name = txt_(data[i][1]); if (!name) continue;
+      var q = num_(data[i][4]); if (q <= 0) continue;
+      var pr = (received[name] && received[name][2] > 0) ? received[name][2] : (avgIssuePrice_(name, d1, d2) || priceFor_(name));
+      if (!pr) continue;
+      if (!spent[name]) spent[name] = [0, 0];
+      spent[name][0] += q;
+      spent[name][1] += q * pr;
+    }
+  }
+
+  // 4. Текущие остатки
+  for (var i = 1; i < stockM.length; i++) {
+    var nm = txt_(stockM[i][COL_M.NAME-1]);
+    var bal = num_(stockM[i][COL_M.BALANCE-1]);
+    var p = num_(stockM[i][COL_M.PRICE-1]);
+    if (!nm || bal <= 0) continue;
+    if (!currentStock[nm]) currentStock[nm] = [0, 0];
+    currentStock[nm][0] += bal;
+    currentStock[nm][1] += bal * p;
+  }
+  for (var i = 1; i < stockN.length; i++) {
+    var nm = txt_(stockN[i][COL_N.NAME-1]);
+    var bal = num_(stockN[i][COL_N.BALANCE-1]);
+    var p = num_(stockN[i][COL_N.PRICE-1]);
+    if (!nm || bal <= 0) continue;
+    if (!currentStock[nm]) currentStock[nm] = [0, 0];
+    currentStock[nm][0] += bal;
+    currentStock[nm][1] += bal * p;
+  }
+  for (var s = 0; s < sheets.length; s++) {
+    var ws = sheets[s];
+    var cabName = ws.getName();
+    if (!isCabinetSheet_(cabName) && !isKitSheet_(cabName)) continue;
+    var cols = getCabinetColumns(ws);
+    if (!cols || !cols.NAME || !cols.FINAL_BALANCE) continue;
+    var data = ws.getDataRange().getValues();
+    for (var i = 1; i < data.length; i++) {
+      var nm = txt_(data[i][cols.NAME-1]);
+      var bal = num_(data[i][cols.FINAL_BALANCE-1]);
+      if (!nm || bal <= 0) continue;
+      if (!currentStock[nm]) currentStock[nm] = [0, 0];
+      currentStock[nm][0] += bal;
+      var pr = priceFor_(nm) || 0;
+      currentStock[nm][1] += bal * pr;
+    }
+  }
+
+  // Собираем все наименования
+  var namesSet = {};
+  Object.keys(received).forEach(function(k){ namesSet[k]=1; });
+  Object.keys(issued).forEach(function(k){ namesSet[k]=1; });
+  Object.keys(spent).forEach(function(k){ namesSet[k]=1; });
+  Object.keys(currentStock).forEach(function(k){ namesSet[k]=1; });
+
+  var list = Object.keys(namesSet).sort(function(a,b){ return a.localeCompare(b, 'ru'); });
+
+  if (filterGroup) {
+    list = list.filter(function(nm) {
+      var grp = txt_(groupFor_(nm)).toLowerCase();
+      return grp === filterGroup;
+    });
+  }
+
+  if (!list.length) {
+    SpreadsheetApp.getUi().alert('Нет данных для прогноза' + (filterGroup ? ' по группе "' + filterGroup + '"' : '') + '!');
+    return;
+  }
+
+  var R = FIRST_ROW;
+  sh.getRange(R,1,1,10).setValues([
+    ['Наименование','Группа','Поступление/мес','Выдача/мес','Списание/мес',
+     'Тек. остаток','Прогноз кол-во','Прогноз сумма (макс. цена)','Дефицит','Макс. цена закупки']
+  ]).setFontWeight('bold').setHorizontalAlignment('center');
+
+  var rows = [];
+  var tRecQ=0, tIssQ=0, tSpQ=0, tStock=0, tFQty=0, tFSum=0, tDef=0;
+
+  for (var i = 0; i < list.length; i++) {
+    var nm = list[i];
+    var grp = groupFor_(nm) || 'Без группы';
+
+    var rec = received[nm] || [0, 0, 0];
+    var iss = issued[nm] || [0, 0];
+    var sp = spent[nm] || [0, 0];
+    var stk = currentStock[nm] || [0, 0];
+
+    var recPerMonth = rec[0] / months;
+    var issPerMonth = iss[0] / months;
+    var spPerMonth = sp[0] / months;
+
+    var fQty = spPerMonth * horizon;
+    var maxPrice = rec[2] || priceFor_(nm) || 0;
+    var fSum = fQty * maxPrice;
+    var deficit = Math.max(0, fQty - stk[0]);
+
+    rows.push([nm, grp, recPerMonth, issPerMonth, spPerMonth, stk[0], fQty, fSum, deficit, maxPrice]);
+
+    tRecQ += recPerMonth;
+    tIssQ += issPerMonth;
+    tSpQ += spPerMonth;
+    tStock += stk[0];
+    tFQty += fQty;
+    tFSum += fSum;
+    tDef += deficit;
+  }
+
+  rows.push(['ИТОГО','', tRecQ, tIssQ, tSpQ, tStock, tFQty, tFSum, tDef, '']);
+
+  var end = writeBlock_(sh, R+1, rows);
+  sh.getRange(end-1,1,1,10).setFontWeight('bold');
+
+  // Цветовая подсветка дефицита
+  var deficitCol = 9;
+  var stockCol = 6;
+  var forecastQtyCol = 7;
+  var dataStartRow = R + 1;
+  var dataEndRow = end - 2;
+
+  for (var r = dataStartRow; r <= dataEndRow; r++) {
+    var deficitVal = sh.getRange(r, deficitCol).getValue();
+    if (deficitVal > 0) {
+      sh.getRange(r, deficitCol).setBackground('#FF6B6B').setFontColor('#FFFFFF').setFontWeight('bold');
+      sh.getRange(r, 1, 1, 2).setBackground('#FFE0E0');
+    } else if (deficitVal === 0) {
+      sh.getRange(r, deficitCol).setBackground('#C8E6C9').setFontColor('#2E7D32');
+    }
+
+    var stockVal = sh.getRange(r, stockCol).getValue();
+    var fQtyVal = sh.getRange(r, forecastQtyCol).getValue();
+    if (stockVal < fQtyVal && stockVal > 0) {
+      sh.getRange(r, stockCol).setBackground('#FFF3CD').setFontColor('#856404');
+    } else if (stockVal === 0 && fQtyVal > 0) {
+      sh.getRange(r, stockCol).setBackground('#FFDAB9').setFontColor('#D84315');
+    }
+  }
+
+  if (tDef > 0) {
+    sh.getRange(end-1, deficitCol).setBackground('#FF6B6B').setFontColor('#FFFFFF').setFontWeight('bold');
+  } else {
+    sh.getRange(end-1, deficitCol).setBackground('#C8E6C9').setFontColor('#2E7D32');
+  }
+
+  if (rows.length > 1) {
+    buildChart_(sh,
+      sh.getRange(R+1,1,rows.length-1,1),
+      [sh.getRange(R+1,8,rows.length-1,1)],
+      'Прогноз расхода на ' + horizon + ' мес. (по макс. цене закупки)' +
+      (filterGroup ? ' — Группа: ' + filterGroup : ''));
+  }
+
+  auditLog_('REPORT', SHEET_FINANCE, 0, 0, '', '',
+    'Прогноз: ' + formatDate_(d1) + ' - ' + formatDate_(d2) + ', горизонт: ' + horizon + ' мес.');
+}
+
+function getGroupsForForecastFilter_() {
+  var groups = {};
+  var dok = readSheet_(SHEET_DOK);
+  for (var i = 1; i < dok.length; i++) {
+    var grp = txt_(dok[i][4]);
+    if (grp) groups[grp] = true;
+  }
+  var stockM = readSheet_(SHEET_STOCK_M);
+  for (var i = 1; i < stockM.length; i++) {
+    var grp = txt_(stockM[i][COL_M.GROUP-1]);
+    if (grp) groups[grp] = true;
+  }
+  var stockN = readSheet_(SHEET_STOCK_N);
+  for (var i = 1; i < stockN.length; i++) {
+    var grp = txt_(stockN[i][COL_N.GROUP-1]);
+    if (grp) groups[grp] = true;
+  }
+  return Object.keys(groups).sort(function(a,b){ return a.localeCompare(b, 'ru'); });
+}
+
+function runForecastWithGroupFilter() {
+  var ui = SpreadsheetApp.getUi();
+  var groups = getGroupsForForecastFilter_();
+
+  if (!groups.length) {
+    ui.alert('Группы не найдены. Справочник «Док» пуст?');
+    return;
+  }
+
+  var groupList = groups.join('\n');
+  var response = ui.prompt(
+    'Фильтр по группе',
+    'Доступные группы:\n\n' + groupList + '\n\nВведите название группы (или оставьте пустым для всех):',
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (response.getSelectedButton() !== ui.Button.OK) return;
+
+  var filterGroup = txt_(response.getResponseText());
+  var sh = getSheet_(SHEET_FINANCE);
+  var d1 = toDateSafe_(sh.getRange(CELL_DATE_START).getValue());
+  var d2 = toDateSafe_(sh.getRange(CELL_DATE_END).getValue());
+  var horizon = parseInt(sh.getRange(CELL_HORIZON).getValue()) || 3;
+
+  if (!d1 || !d2) {
+    ui.alert('Укажите даты начала и окончания периода (A3, B3) на листе «Финансовый отчёт»!');
+    return;
+  }
+
+  clearReportArea_();
+  forecast_(d1, d2, horizon, filterGroup);
+}
+
+// ============================================================
+//  МОДУЛЬ: Info
+// ============================================================
+
+function showInfoOnSheetM(sheet, row) {
+  if (!sheet || !row) return;
+  var infoStartCol = COL_JM.INFO;
+  var maxRows = 15;
+  var infoCols = 3;
+
+  var clearRange = sheet.getRange(row, infoStartCol, maxRows, infoCols);
+  clearRange.clearContent();
+  clearRange.clearFormat();
+  var clearM = sheet.getRange(row, infoStartCol+3, maxRows, 1);
+  clearM.clearContent();
+  clearM.clearFormat();
+
+  var drug = sheet.getRange(row, COL_JM.NAME).getValue();
+  if (!drug) return;
+
+  var stock = getSheet_(SHEET_STOCK_M);
+  var data = stock.getDataRange().getValues();
+
+  var batches = {};
+  var totalBalance = 0;
+  for (var i = 1; i < data.length; i++) {
+    var r = data[i];
+    if (r[COL_M.NAME-1].toString().trim() !== drug) continue;
+    var balance = num_(r[COL_M.BALANCE-1]);
+    if (balance <= 0) continue;
+    var serial = r[COL_M.SERIAL-1] ? r[COL_M.SERIAL-1].toString().trim() : '(без серии)';
+    var expiry = r[COL_M.EXPIRY-1] ? formatDate_(r[COL_M.EXPIRY-1]) : '—';
+    var key = serial + '|' + expiry;
+    if (!batches[key]) batches[key] = { serial: serial, expiry: expiry, balance: 0 };
+    batches[key].balance += balance;
+    totalBalance += balance;
+  }
+
+  var offset = 0;
+  var headerCell = sheet.getRange(row + offset, infoStartCol);
+  headerCell.setValue(drug);
+  headerCell.setFontWeight('bold').setFontSize(10).setBackground('#0066CC').setFontColor('#FFFFFF');
+  sheet.getRange(row + offset, infoStartCol, 1, infoCols).merge().setHorizontalAlignment('center');
+  offset += 1;
+
+  sheet.getRange(row + offset, infoStartCol).setValue("Серия");
+  sheet.getRange(row + offset, infoStartCol+1).setValue("Срок");
+  sheet.getRange(row + offset, infoStartCol+2).setValue("Остаток");
+  sheet.getRange(row + offset, infoStartCol, 1, infoCols).setFontWeight('bold').setBackground('#E0E0E0');
+  offset += 1;
+
+  var keys = Object.keys(batches);
+  if (keys.length === 0) {
+    sheet.getRange(row + offset, infoStartCol).setValue("Нет остатков").setFontColor('#FF0000');
+    offset += 1;
+  } else {
+    for (var k = 0; k < keys.length && offset < maxRows-2; k++) {
+      var b = batches[keys[k]];
+      sheet.getRange(row + offset, infoStartCol).setValue(b.serial);
+      sheet.getRange(row + offset, infoStartCol+1).setValue(b.expiry);
+      sheet.getRange(row + offset, infoStartCol+2).setValue(b.balance);
+      offset += 1;
+    }
+  }
+
+  sheet.getRange(row + offset, infoStartCol).setValue("ИТОГО:").setFontWeight('bold');
+  sheet.getRange(row + offset, infoStartCol+1).setValue(totalBalance).setFontWeight('bold').setFontColor('#008000');
+  sheet.getRange(row + offset, infoStartCol, 1, infoCols).setBackground('#DCFFDC');
+
+  var lastRow = row + offset + 1;
+  var borderRange = sheet.getRange(row, infoStartCol, lastRow - row + 1, infoCols);
+  borderRange.setBorder(true, true, true, true, true, true);
+  sheet.setColumnWidth(infoStartCol, 150);
+  sheet.setColumnWidth(infoStartCol+1, 100);
+  sheet.setColumnWidth(infoStartCol+2, 80);
+}
+
+function showInfoOnSheetN(sheet, row) {
+  if (!sheet || !row) return;
+  var infoStartCol = COL_JN.INFO;
+  var maxRows = 15;
+  var infoCols = 3;
+
+  var clearRange = sheet.getRange(row, infoStartCol, maxRows, infoCols);
+  clearRange.clearContent();
+  clearRange.clearFormat();
+  var clearK = sheet.getRange(row, infoStartCol+3, maxRows, 1);
+  clearK.clearContent();
+  clearK.clearFormat();
+
+  var drug = sheet.getRange(row, COL_JN.NAME).getValue();
+  if (!drug) return;
+
+  var stock = getSheet_(SHEET_STOCK_N);
+  var data = stock.getDataRange().getValues();
+
+  var batches = [];
+  var totalRest = 0;
+  for (var i = 1; i < data.length; i++) {
+    var r = data[i];
+    if (r[COL_N.NAME-1].toString().trim() !== drug) continue;
+    var rest = num_(r[COL_N.BALANCE-1]);
+    if (rest <= 0.0001) continue;
+    var date = r[COL_N.DATE-1] ? formatDate_(r[COL_N.DATE-1]) : '—';
+    batches.push({ date: date, rest: rest });
+    totalRest += rest;
+  }
+
+  if (batches.length === 0) {
+    sheet.getRange(row, infoStartCol).setValue("Нет остатков").setFontColor('#FF0000');
+    return;
+  }
+
+  var offset = 0;
+  var headerCell = sheet.getRange(row + offset, infoStartCol);
+  headerCell.setValue(drug).setFontWeight('bold').setFontSize(11)
+    .setBackground('#0066CC').setFontColor('#FFFFFF');
+  sheet.getRange(row + offset, infoStartCol, 1, infoCols).merge().setHorizontalAlignment('center');
+  offset += 1;
+
+  sheet.getRange(row + offset, infoStartCol).setValue("Дата прихода");
+  sheet.getRange(row + offset, infoStartCol+1).setValue("Остаток");
+  sheet.getRange(row + offset, infoStartCol, 1, infoCols).setFontWeight('bold').setBackground('#E0E0E0');
+  offset += 1;
+
+  for (var b = 0; b < batches.length && offset < maxRows-1; b++) {
+    var batch = batches[b];
+    sheet.getRange(row + offset, infoStartCol).setValue(batch.date);
+    sheet.getRange(row + offset, infoStartCol+1).setValue(batch.rest);
+    offset += 1;
+  }
+
+  if (offset < maxRows) {
+    sheet.getRange(row + offset, infoStartCol).setValue("ИТОГО:").setFontWeight('bold');
+    sheet.getRange(row + offset, infoStartCol+1).setValue(totalRest).setFontWeight('bold').setFontColor('#008000');
+    sheet.getRange(row + offset, infoStartCol, 1, infoCols).setBackground('#DCFFDC');
+  }
+
+  var lastRow = row + offset + 1;
+  var borderRange = sheet.getRange(row, infoStartCol, lastRow - row + 1, infoCols);
+  borderRange.setBorder(true, true, true, true, true, true);
+  sheet.autoResizeColumns(infoStartCol, infoCols);
+}
+
+// ============================================================
+//  МОДУЛЬ: Validation
+// ============================================================
+
+function setDataValidationList(sheet, row, col, list) {
+  if (!sheet || !row || !col) return;
+  var cell = sheet.getRange(row, col);
+  try { cell.setDataValidation(null); } catch(e) {}
+  if (list && list.length > 0) {
+    var unique = [];
+    var seen = {};
+    list.forEach(function(item) {
+      var key = item.toString().trim();
+      if (key && !seen[key]) { seen[key] = true; unique.push(key); }
+    });
+    if (unique.length) {
+      var rule = SpreadsheetApp.newDataValidation()
+        .requireValueInList(unique, true)
+        .setAllowInvalid(true)
+        .build();
+      cell.setDataValidation(rule);
+    }
+  }
+}
+
+function clearDataValidation(sheet, row, col) {
+  if (!sheet || !row || !col) return;
+  try { sheet.getRange(row, col).setDataValidation(null); } catch(e) {}
+}
+
+function removeStockValidations() {
+  try {
+    var stockM = getSheet_(SHEET_STOCK_M);
+    if (stockM) {
+      var colsM = [COL_M.NAME, COL_M.FORM, COL_M.GROUP, COL_M.SUPPLIER];
+      colsM.forEach(function(c) {
+        var range = stockM.getRange(2, c, Math.max(1, stockM.getLastRow()-1), 1);
+        range.setDataValidation(null);
+      });
+    }
+    var stockN = getSheet_(SHEET_STOCK_N);
+    if (stockN) {
+      var colsN = [COL_N.NAME, COL_N.FORM, COL_N.GROUP, COL_N.SUPPLIER];
+      colsN.forEach(function(c) {
+        var range = stockN.getRange(2, c, Math.max(1, stockN.getLastRow()-1), 1);
+        range.setDataValidation(null);
+      });
+    }
+  } catch(e) { console.warn('Ошибка при удалении проверок: ' + e.message); }
+}
+
+// ============================================================
+//  МОДУЛЬ: Triggers
+// ============================================================
+
+function createTriggers() {
+  try {
+    var triggers = ScriptApp.getProjectTriggers();
+  } catch(e) {
+    console.warn('Нет прав на управление триггерами.');
+    return;
+  }
+
+  var hasEdit = false, hasSelect = false, hasDaily = false;
+  for (var i = 0; i < triggers.length; i++) {
+    if (triggers[i].getHandlerFunction() === 'onEdit') hasEdit = true;
+    if (triggers[i].getHandlerFunction() === 'onSelectionChange') hasSelect = true;
+    if (triggers[i].getHandlerFunction() === 'dailyArchive' && triggers[i].getEventType() === ScriptApp.EventType.CLOCK) hasDaily = true;
+  }
+
+  if (!hasEdit) {
+    try {
+      ScriptApp.newTrigger('onEdit')
+        .forSpreadsheet(SpreadsheetApp.getActiveSpreadsheet())
+        .onEdit()
+        .create();
+      console.log('Триггер onEdit создан.');
+    } catch(e) {
+      console.warn('Не удалось создать триггер onEdit: ' + e.message);
+    }
+  }
+
+  if (!hasSelect) {
+    try {
+      ScriptApp.newTrigger('onSelectionChange')
+        .forSpreadsheet(SpreadsheetApp.getActiveSpreadsheet())
+        .onSelectionChange()
+        .create();
+      console.log('Триггер onSelectionChange создан.');
+    } catch(e) {
+      console.warn('Не удалось создать триггер onSelectionChange: ' + e.message);
+    }
+  }
+
+  if (!hasDaily) {
+    try {
+      ScriptApp.newTrigger('dailyArchive')
+        .timeBased()
+        .everyDays(1)
+        .atHour(2)
+        .create();
+      console.log('Триггер dailyArchive создан (ежедневно в 2:00).');
+    } catch(e) {
+      console.warn('Не удалось создать триггер dailyArchive: ' + e.message);
+    }
+  }
+}
+
+function dailyArchive() {
+  var props = PropertiesService.getScriptProperties();
+  var lastRun = props.getProperty('lastArchiveDate');
+  var today = formatDate_(new Date());
+  if (lastRun === today) {
+    console.log('dailyArchive: уже выполнялся сегодня, пропускаем');
+    return;
+  }
+
+  archiveExpiredItems();
+  archiveZeroBalances();
+  archiveZeroCabinetRows();
+  recalculateAllCabinets();
+
+  var day = new Date().getDay();
+  if (day === 1) {
+    cleanArchiveMemory();
+  }
+
+  props.setProperty('lastArchiveDate', today);
+  console.log('dailyArchive: выполнен ' + today);
+}
+
+/**
+ * ИСПРАВЛЕНО: onSelectionChange обновляет Info-панель только при смене наименования.
+ * Раньше обновлялось при каждом выделении ячейки — лишние записи.
+ */
+function onSelectionChange(e) {
+  if (!e) return;
+  var range = e.range;
+  var sheet = range.getSheet();
+  var sheetName = sheet.getName();
+  var row = range.getRow();
+  var col = range.getColumn();
+
+  if ((sheetName === SHEET_JOURNAL_M || sheetName === SHEET_JOURNAL_N) && col === 2 && row >= 2) {
+    var drug = sheet.getRange(row, col).getValue();
+    if (!drug) return;
+
+    // Проверяем: обновлять Info-панель только если наименование изменилось
+    if (!_lastInfoDrug) _lastInfoDrug = {};
+    var cacheKey = sheetName + '|' + row;
+    if (_lastInfoDrug[cacheKey] === drug) return; // то же самое наименование — пропускаем
+    _lastInfoDrug[cacheKey] = drug;
+
+    if (sheetName === SHEET_JOURNAL_M) showInfoOnSheetM(sheet, row);
+    else showInfoOnSheetN(sheet, row);
+  }
+}
+
+// ============================================================
+//  МОДУЛЬ: Main (onOpen, onEdit, Menu)
+// ============================================================
+
+function onOpen() {
+  try {
+    ensureAuditSheet_();
+    removeStockValidations();
+    createOrderSheet_();
+    updateNameDropdownsM();
+    updateNameDropdownsN();
+    updateCabinetList();
+  } catch(e) {
+    console.warn('Ошибка в onOpen (инициализация): ' + e.message);
+  }
+
+  var ui = SpreadsheetApp.getUi();
+  var menu = ui.createMenu('📦 Складской учёт');
+
+  menu.addItem('📋 Обновить справочник и списки', 'rebuildDictionaries');
+  menu.addSeparator();
+
+  menu.addItem('⏰ Проверить сроки годности (М)', 'checkAllExpiryDates');
+  menu.addItem('📦 Архивировать просроченные', 'archiveExpiredItems');
+  menu.addItem('📦 Архивировать нулевые остатки', 'archiveZeroBalances');
+  menu.addItem('📦 Архивировать нулевые остатки в кабинетах', 'archiveZeroCabinetRows');
+  menu.addItem('🗑️ Очистить журнал выдачи М', 'clearJournalM');
+  menu.addItem('🗑️ Архив → Списать (удалить)', 'deleteFromArchive');
+  menu.addItem('♻️ Архив → Утилизировать', 'markAsUtilized');
+  menu.addItem('↩️ Архив → Вернуть из архива', 'returnFromArchive');
+  menu.addSeparator();
+
+  menu.addItem('📋 Обновить списки кабинетов', 'updateCabinetList');
+  menu.addItem('🔄 Пересчитать текущий кабинет', 'recalculateCurrentCabinet');
+  menu.addItem('🔄 Пересчитать все кабинеты', 'recalculateAllCabinets');
+  menu.addItem('↩️ Отменить выдачу (Журнал М)', 'undoIssueM');
+  menu.addItem('↩️ Отменить выдачу (Журнал Н)', 'undoIssueN');
+  menu.addSeparator();
+
+  menu.addItem('🛒 Сформировать заказы', 'generateOrders');
+  menu.addSeparator();
+
+  menu.addItem('📊 Финансовый отчёт', 'showFinanceReportDialog');
+  menu.addSeparator();
+
+  menu.addItem('🧹 Очистка архива от дублей', 'cleanArchiveMemory');
+  menu.addItem('🧹 Полная очистка архива', 'clearArchive');
+  menu.addSeparator();
+  menu.addItem('↩️ Отменить последнее списание', 'undoLastWriteOff');
+  menu.addSeparator();
+  menu.addItem('🔄 Обновить текущий кабинет', 'updateCurrentCabinet');
+  menu.addItem('🔄 Обновить все кабинеты', 'updateAllCabinets');
+  menu.addItem('🧹 Очистить все данные', 'clearAllData');
+
+  menu.addToUi();
+
+  try {
+    createTriggers();
+  } catch(e) {
+    console.log('Не удалось создать триггеры: ' + e.message);
+  }
+}
+
+/**
+ * ИСПРАВЛЕНО: onEdit без блокировки (LockService).
+ * Блокировка вызывала тормоза при каждом редактировании ячейки.
+ * Тяжёлые операции (пересчёт, архивация) — только через меню.
+ */
+function onEdit(e) {
+  try {
+    if (!e || !e.range) return;
+    if (_skipNextOnEdit) { _skipNextOnEdit = false; return; }
+
+    var range = e.range;
+    var sheet = range.getSheet();
+    var sheetName = sheet.getName();
+    var row = range.getRow();
+    var col = range.getColumn();
+    var value = e.value;
+
+    if (!sheet || !row || !col) return;
+
+    auditLog_('EDIT', sheetName, row, col, e.oldValue, value, '');
+
+    if (range.getNumRows() > 1 || range.getNumColumns() > 1) {
+      if ((sheetName === SHEET_STOCK_M || sheetName === SHEET_STOCK_N) && col === 2) {
+        var vals = range.getValues();
+        for (var i = 0; i < vals.length; i++) {
+          if (vals[i][0]) updateDictionary_(vals[i][0]);
+        }
+        updateNameDropdownsM();
+        updateNameDropdownsN();
+      }
+      return;
+    }
+
+    if (value === undefined || value === null) return;
+
+    // СКЛАД М
+    if (sheetName === SHEET_STOCK_M) {
+      if (col === COL_M.NAME) {
+        updateDictionary_(value);
+        autoFillGroup_(sheet, row, value, COL_M);
+        autoFillForm_(sheet, row, value, COL_M);
+        autoFillSupplier_(sheet, row, value, COL_M);
+        updateNameDropdownsM();
+        updateNameDropdownsN();
+        recalculateStockM();
+      } else if (col === COL_M.FORM) {
+        saveFormMapping_(sheet, row, value, COL_M);
+      } else if (col === COL_M.GROUP) {
+        saveGroupMapping_(sheet, row, value, COL_M);
+      } else if (col === COL_M.SUPPLIER) {
+        saveSupplierMapping_(sheet, row, value, COL_M);
+      } else if (col === COL_M.QTY) {
+        recalculateStockM();
+      }
+      return;
+    }
+
+    // СКЛАД Н
+    if (sheetName === SHEET_STOCK_N) {
+      if (col === COL_N.NAME) {
+        updateDictionary_(value);
+        autoFillGroup_(sheet, row, value, COL_N);
+        autoFillForm_(sheet, row, value, COL_N);
+        autoFillSupplier_(sheet, row, value, COL_N);
+        updateNameDropdownsM();
+        updateNameDropdownsN();
+        recalculateStockN();
+      } else if (col === COL_N.FORM) {
+        saveFormMapping_(sheet, row, value, COL_N);
+      } else if (col === COL_N.GROUP) {
+        saveGroupMapping_(sheet, row, value, COL_N);
+      } else if (col === COL_N.SUPPLIER) {
+        saveSupplierMapping_(sheet, row, value, COL_N);
+      } else if (col === COL_N.QTY) {
+        recalculateStockN();
+      }
+      return;
+    }
+
+    // ЖУРНАЛ М
+    if (sheetName === SHEET_JOURNAL_M) {
+      if (col === COL_JM.NAME) {
+        fillJournalMData_(sheet, row, value);
+        sheet.getRange(row, COL_JM.QUANTITY).clearContent();
+        showInfoOnSheetM(sheet, row);
+        recalculateStockM();
+      } else if (col === COL_JM.SERIAL) {
+        var drug = sheet.getRange(row, COL_JM.NAME).getValue();
+        if (drug && value) {
+          var batches = getBatchesM_(drug);
+          if (batches.length) {
+            processSerialChoice_(sheet, row, value, batches);
+            sheet.getRange(row, COL_JM.QUANTITY).clearContent();
+            showInfoOnSheetM(sheet, row);
+          }
+        } else {
+          sheet.getRange(row, COL_JM.EXPIRY).clearContent();
+          sheet.getRange(row, COL_JM.QUANTITY).clearContent();
+          showInfoOnSheetM(sheet, row);
+        }
+        recalculateStockM();
+      } else if (col === COL_JM.EXPIRY) {
+        var drug = sheet.getRange(row, COL_JM.NAME).getValue();
+        if (drug && value) {
+          var batches = getBatchesM_(drug);
+          if (batches.length) {
+            processExpiryChoice_(sheet, row, value, batches);
+            sheet.getRange(row, COL_JM.QUANTITY).clearContent();
+            showInfoOnSheetM(sheet, row);
+          }
+        }
+      } else if (col === COL_JM.QUANTITY) {
+        var qty = parseFloat(value);
+        if (!isNaN(qty) && qty > 0) {
+          if (validateJournalMQty_(sheet, row)) {
+            var cabinet = sheet.getRange(row, COL_JM.CABINET).getValue();
+            if (cabinet) {
+              _skipNextOnEdit = true;
+              try {
+                pushToCabinet_(sheet, row, 'M');
+              } finally {
+                _skipNextOnEdit = false;
+              }
+              showInfoOnSheetM(sheet, row);
+              recalculateStockM();
+            } else {
+              safeAlert_('Не указан кабинет!');
+              sheet.getRange(row, COL_JM.QUANTITY).clearContent();
+              showInfoOnSheetM(sheet, row);
+            }
+          } else {
+            sheet.getRange(row, COL_JM.QUANTITY).clearContent();
+          }
+        }
+      }
+      return;
+    }
+
+    // ЖУРНАЛ Н
+    if (sheetName === SHEET_JOURNAL_N) {
+      if (col === COL_JN.NAME) {
+        fillJournalNData_(sheet, row, value);
+        sheet.getRange(row, COL_JN.QUANTITY).clearContent();
+        showInfoOnSheetN(sheet, row);
+        recalculateStockN();
+      } else if (col === COL_JN.ARRIVAL_DATE) {
+        var drug = sheet.getRange(row, COL_JN.NAME).getValue();
+        if (drug && value) {
+          var dateValue = value;
+          if (typeof value === 'string' && value.indexOf('|') !== -1) {
+            var parts = value.split('|');
+            var dateStr = parts[0].trim();
+            var parsedDate = toDateSafe_(dateStr);
+            if (parsedDate) {
+              dateValue = parsedDate;
+              sheet.getRange(row, COL_JN.ARRIVAL_DATE).setValue(dateValue);
+            } else {
+              safeAlert_('Не удалось распознать дату: ' + value);
+              sheet.getRange(row, COL_JN.ARRIVAL_DATE).clearContent();
+              return;
+            }
+          }
+          var stock = getSheet_(SHEET_STOCK_N);
+          if (stock) {
+            var data = stock.getDataRange().getValues();
+            var dateNorm = normalizeDate(dateValue);
+            for (var i = 1; i < data.length; i++) {
+              if (String(data[i][COL_N.NAME-1]).trim() === drug) {
+                var d = data[i][COL_N.DATE-1];
+                if (normalizeDate(d) === dateNorm) {
+                  var price = data[i][COL_N.PRICE-1] || 0;
+                  sheet.getRange(row, COL_JN.PRICE).setValue(price);
+                  break;
+                }
+              }
+            }
+          }
+          sheet.getRange(row, COL_JN.QUANTITY).clearContent();
+          updateAvailableN_(sheet, row);
+          showInfoOnSheetN(sheet, row);
+          recalculateStockN();
+        }
+      } else if (col === COL_JN.QUANTITY) {
+        var qty = parseFloat(value);
+        if (!isNaN(qty) && qty > 0) {
+          if (validateJournalNQty_(sheet, row)) {
+            var cabinet = sheet.getRange(row, COL_JN.CABINET).getValue();
+            if (cabinet) {
+              _skipNextOnEdit = true;
+              try {
+                pushToCabinet_(sheet, row, 'N');
+              } finally {
+                _skipNextOnEdit = false;
+              }
+              updateAvailableN_(sheet, row);
+              showInfoOnSheetN(sheet, row);
+              recalculateStockN();
+            } else {
+              safeAlert_('Не указан кабинет!');
+              sheet.getRange(row, COL_JN.QUANTITY).clearContent();
+              showInfoOnSheetN(sheet, row);
+            }
+          } else {
+            sheet.getRange(row, COL_JN.QUANTITY).clearContent();
+          }
+        }
+      }
+      return;
+    }
+
+    // КАБИНЕТЫ И АПТЕЧКИ
+    if (isCabinetSheet_(sheetName) || isKitSheet_(sheetName)) {
+      var cols = getCabinetColumns(sheet);
+      if (!cols) return;
+
+      if (col === cols.QTY) {
+        recalculateCabinet(sheetName);
+        return;
+      }
+
+      if (col === cols.WRITE_OFF) {
+        if (value !== undefined && value !== null && value !== '') {
+          handleWriteOff_(sheet, row, value, sheetName, col);
+        }
+        return;
+      }
+
+      if (col === cols.NAME || col === cols.SERIAL || col === cols.EXPIRY) {
+        recalculateCabinet(sheetName);
+        return;
+      }
+    }
+  } catch (err) {
+    console.error('Ошибка в onEdit: ' + err.message);
+    console.error(err.stack);
+    safeAlert_('Ошибка при обработке изменения: ' + err.message);
+    auditLog_('ERROR', sheetName || 'unknown', row || 0, col || 0, '', '', err.message);
+  }
+}
+
+// ============================================================
+//  МОДУЛЬ: Maintenance
+// ============================================================
+
+function updateAllCabinets() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheets = ss.getSheets();
+  var count = 0;
+  for (var i = 0; i < sheets.length; i++) {
+    var name = sheets[i].getName();
+    if (isCabinetSheet_(name) || isKitSheet_(name)) {
+      recalculateCabinet(name);
+      count++;
+    }
+  }
+  SpreadsheetApp.flush();
+  SpreadsheetApp.getActiveSpreadsheet().toast('Обновлено ' + count + ' кабинетов.', 'Готово', 3);
+}
+
+function updateCurrentCabinet() {
+  var sheet = SpreadsheetApp.getActiveSheet();
+  var name = sheet.getName();
+  if (!isCabinetSheet_(name) && !isKitSheet_(name)) {
+    SpreadsheetApp.getUi().alert('Это не лист кабинета или аптечки.');
+    return;
+  }
+  recalculateCabinet(name);
+  SpreadsheetApp.flush();
+  SpreadsheetApp.getActiveSpreadsheet().toast('Кабинет "' + name + '" обновлён.', 'Готово', 3);
+}
+
+function recalculateCurrentCabinet() {
+  var sheet = SpreadsheetApp.getActiveSheet();
+  var name = sheet.getName();
+  if (!isCabinetSheet_(name) && !isKitSheet_(name)) {
+    SpreadsheetApp.getUi().alert('Это не лист кабинета или аптечки.');
+    return;
+  }
+  recalculateCabinet(name);
+  SpreadsheetApp.getActiveSpreadsheet().toast('Кабинет "' + name + '" пересчитан.', 'Готово', 3);
+}
+
+function clearJournalM() {
+  var jm = getSheet_(SHEET_JOURNAL_M);
+  if (!jm) return;
+  var lastRow = jm.getLastRow();
+  if (lastRow >= 2) {
+    jm.getRange(2, 1, lastRow - 1, jm.getLastColumn()).clearContent();
+    jm.getRange(2, 1, lastRow - 1, jm.getLastColumn()).clearDataValidations();
+  }
+  safeAlert_('Журнал выдачи М очищен.');
+}
+
+function undoLastWriteOff() {
+  var sheet = SpreadsheetApp.getActiveSheet();
+  var cabinetName = sheet.getName();
+  if (!isCabinetSheet_(cabinetName) && !isKitSheet_(cabinetName)) {
+    safeAlert_('Это не лист кабинета или аптечки.');
+    return;
+  }
+  var historyName = "Расход " + cabinetName;
+  var historySheet = null;
+  try {
+    historySheet = getSheet_(historyName);
+  } catch(e) {
+    safeAlert_('Нет истории списаний для этого кабинета.');
+    return;
+  }
+  var lastRow = historySheet.getLastRow();
+  if (lastRow < 2) {
+    safeAlert_('Нет списаний для отмены.');
+    return;
+  }
+  historySheet.deleteRow(lastRow);
+  SpreadsheetApp.flush();
+  recalculateCabinet(cabinetName);
+  safeAlert_('Последнее списание отменено. Остаток восстановлен.');
+}
+
+function clearAllData() {
+  var ui = SpreadsheetApp.getUi();
+  var response = ui.alert('Очистка данных', 'Будут удалены ВСЕ данные. Продолжить?', ui.ButtonSet.YES_NO);
+  if (response !== ui.Button.YES) return;
+
+  // Двойное подтверждение
+  var response2 = ui.alert('ВНИМАНИЕ', 'Вы уверены? Это действие необратимо!', ui.ButtonSet.YES_NO);
+  if (response2 !== ui.Button.YES) return;
+
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheetsToClean = [SHEET_STOCK_M, SHEET_STOCK_N, SHEET_JOURNAL_M, SHEET_JOURNAL_N, SHEET_ARCHIVE, SHEET_ORDERS];
+
+  sheetsToClean.forEach(function(sheetName) {
+    var sheet = ss.getSheetByName(sheetName);
+    if (!sheet) return;
+    var lastRow = sheet.getLastRow();
+    if (lastRow >= 2) {
+      sheet.getRange(2, 1, lastRow - 1, sheet.getLastColumn()).clear({contentsOnly: true});
+    }
+  });
+
+  var allSheets = ss.getSheets();
+  allSheets.forEach(function(sheet) {
+    var name = sheet.getName();
+    if (isCabinetSheet_(name) || isKitSheet_(name) || name.indexOf('Расход ') === 0) {
+      var lastRow = sheet.getLastRow();
+      if (lastRow >= 2) {
+        sheet.getRange(2, 1, lastRow - 1, sheet.getLastColumn()).clear({contentsOnly: true});
+      }
+    }
+  });
+
+  var finSheet = ss.getSheetByName(SHEET_FINANCE);
+  if (finSheet) {
+    var lastRow = finSheet.getLastRow();
+    if (lastRow >= FIRST_ROW) {
+      finSheet.getRange(FIRST_ROW, 1, lastRow - FIRST_ROW + 1, 50).clear({contentsOnly: true, formatOnly: true});
+    }
+  }
+
+  recalculateStockM();
+  recalculateStockN();
+  recalculateAllCabinets();
+  invalidateAllCaches_();
+
+  auditLog_('CLEAR_ALL', 'ALL', 0, 0, '', '', 'Полная очистка данных');
+  ui.alert('Очистка завершена. Все данные удалены, структура сохранена.');
+}
+
+function checkAllExpiryDates() {
+  var stock = getSheet_(SHEET_STOCK_M);
+  var data = stock.getDataRange().getValues();
+  var expired = [], soon = [];
+  var today = new Date(); today.setHours(0,0,0,0);
+
+  for (var i = 1; i < data.length; i++) {
+    var exp = data[i][COL_M.EXPIRY-1];
+    if (!(exp instanceof Date)) continue;
+    var days = Math.floor((exp - today) / (1000*60*60*24));
+    if (days < 0) {
+      expired.push({name: data[i][COL_M.NAME-1], serial: data[i][COL_M.SERIAL-1], exp: exp});
+    } else if (days < 90) {
+      soon.push({name: data[i][COL_M.NAME-1], serial: data[i][COL_M.SERIAL-1], exp: exp});
+    }
+  }
+
+  var msg = '';
+  if (expired.length) msg += 'Просрочено: ' + expired.length + ' позиций.\n';
+  if (soon.length) msg += 'Осталось <90 дней: ' + soon.length + ' позиций.\n';
+  if (!msg) msg = 'Все сроки в порядке.';
+  safeAlert_(msg);
+}
+
+function showFinanceReportDialog() {
+  var html = HtmlService.createHtmlOutputFromFile('FinanceDialog')
+    .setWidth(500)
+    .setHeight(420)
+    .setTitle('Финансовый отчёт');
+  SpreadsheetApp.getUi().showModalDialog(html, 'Финансовый отчёт');
+}
+
+function runReportFromDialog(params) {
+  if (!params) { safeAlert_('Ошибка: параметры не переданы.'); return; }
+
+  var type = params.reportType;
+
+  // Тип "Текущие остатки" не требует дат
+  if (type === 'Текущие остатки') {
+    clearReportArea_();
+    currentStockValues_();
+    return;
+  }
+
+  // Все остальные типы требуют дат
+  var dStart = params.dateStart ? new Date(params.dateStart) : null;
+  var dEnd = params.dateEnd ? new Date(params.dateEnd) : null;
+
+  if (!dStart || !dEnd || isNaN(dStart.getTime()) || isNaN(dEnd.getTime())) {
+    safeAlert_('Укажите корректные даты периода (A3, B3)!');
+    return;
+  }
+  if (dStart > dEnd) {
+    safeAlert_('Дата начала позже окончания!');
+    return;
+  }
+
+  clearReportArea_();
+
+  switch (type) {
+    case 'Полный расход по наименованиям':
+      fullReportByName_(dStart, dEnd);
+      break;
+    case 'Полный расход по группам':
+      fullReportByGroup_(dStart, dEnd);
+      break;
+    case 'Расход по кабинетам':
+      reportByCabinet_(dStart, dEnd);
+      break;
+    case 'Расход на просроченные':
+      expiredExpenses_(dStart, dEnd);
+      break;
+    case 'Прогноз расхода':
+      var horizon = params.horizon || 3;
+      forecast_(dStart, dEnd, horizon);
+      break;
+    case 'Изменение цен за период':
+      priceChangesReport_(dStart, dEnd);
+      break;
+    case 'Изменение цен по группам':
+      groupPriceChangesReport_(dStart, dEnd);
+      break;
+    default:
+      safeAlert_('Неизвестный тип отчёта: ' + type);
+  }
+
+  auditLog_('REPORT', SHEET_FINANCE, 0, 0, '', '',
+    'Отчёт: ' + type + ', ' + formatDate_(dStart) + ' - ' + formatDate_(dEnd));
+}
+
+function getNamesAndGroups() {
+  var dok = getSheet_(SHEET_DOK);
+  if (!dok) return { names: [], groups: [] };
+  var data = dok.getDataRange().getValues();
+  var namesSet = {};
+  var groupsSet = {};
+  for (var i = 1; i < data.length; i++) {
+    var name = txt_(data[i][0]);
+    var group = txt_(data[i][4]);
+    if (name) namesSet[name] = true;
+    if (group) groupsSet[group] = true;
+  }
+  var stockM = getSheet_(SHEET_STOCK_M).getDataRange().getValues();
+  for (var i = 1; i < stockM.length; i++) {
+    var name = txt_(stockM[i][COL_M.NAME-1]);
+    if (name) namesSet[name] = true;
+  }
+  var stockN = getSheet_(SHEET_STOCK_N).getDataRange().getValues();
+  for (var i = 1; i < stockN.length; i++) {
+    var name = txt_(stockN[i][COL_N.NAME-1]);
+    if (name) namesSet[name] = true;
+  }
+  return {
+    names: Object.keys(namesSet).sort(function(a,b){ return a.localeCompare(b, 'ru'); }),
+    groups: Object.keys(groupsSet).sort(function(a,b){ return a.localeCompare(b, 'ru'); })
+  };
+}
+
+// ============================================================
+//  МОДУЛЬ: Finance Reports (Финансовые отчёты)
+// ============================================================
+
+/**
+ * Текущие остатки — сводка по всем складам и кабинетам.
+ * Столбцы: Наименование | Источник | Остаток | Цена | Сумма
+ */
+function currentStockValues_() {
+  var sh = getSheet_(SHEET_FINANCE);
+  var R = FIRST_ROW;
+
+  sh.getRange(R, 1, 1, 5).setValues([
+    ['Наименование', 'Источник', 'Остаток', 'Цена', 'Сумма']
+  ]).setFontWeight('bold').setBackground('#D9EAD3');
+
+  var items = {};
+
+  // Склад М
+  var stockM = getSheet_(SHEET_STOCK_M).getDataRange().getValues();
+  for (var i = 1; i < stockM.length; i++) {
+    var name = txt_(stockM[i][COL_M.NAME-1]);
+    var bal = num_(stockM[i][COL_M.BALANCE-1]);
+    var price = num_(stockM[i][COL_M.PRICE-1]);
+    if (!name || bal <= 0) continue;
+    var key = normalizeStr(name) + '|Склад М';
+    if (!items[key]) items[key] = { name: name, source: 'Склад М', qty: 0, price: price };
+    items[key].qty += bal;
+    if (price > items[key].price) items[key].price = price;
+  }
+
+  // Склад Н
+  var stockN = getSheet_(SHEET_STOCK_N).getDataRange().getValues();
+  for (var i = 1; i < stockN.length; i++) {
+    var name = txt_(stockN[i][COL_N.NAME-1]);
+    var bal = num_(stockN[i][COL_N.BALANCE-1]);
+    var price = num_(stockN[i][COL_N.PRICE-1]);
+    if (!name || bal <= 0) continue;
+    var key = normalizeStr(name) + '|Склад Н';
+    if (!items[key]) items[key] = { name: name, source: 'Склад Н', qty: 0, price: price };
+    items[key].qty += bal;
+    if (price > items[key].price) items[key].price = price;
+  }
+
+  // Кабинеты
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheets = ss.getSheets();
+  for (var s = 0; s < sheets.length; s++) {
+    var sName = sheets[s].getName();
+    if (!isCabinetSheet_(sName) && !isKitSheet_(sName)) continue;
+    var cols = getCabinetColumns(sheets[s]);
+    if (!cols || !cols.NAME || !cols.FINAL_BALANCE) continue;
+    var data = sheets[s].getDataRange().getValues();
+    for (var i = 1; i < data.length; i++) {
+      var name = txt_(data[i][cols.NAME-1]);
+      var bal = num_(data[i][cols.FINAL_BALANCE-1]);
+      var price = cols.PRICE ? num_(data[i][cols.PRICE-1]) : priceFor_(name);
+      if (!name || bal <= 0) continue;
+      var key = normalizeStr(name) + '|' + sName;
+      if (!items[key]) items[key] = { name: name, source: sName, qty: 0, price: price };
+      items[key].qty += bal;
+      if (price > items[key].price) items[key].price = price;
+    }
+  }
+
+  var list = Object.keys(items).sort(function(a,b) {
+    return items[a].name.localeCompare(items[b].name, 'ru');
+  });
+
+  var rows = [];
+  var tQty = 0, tSum = 0;
+  for (var i = 0; i < list.length; i++) {
+    var it = items[list[i]];
+    var sum = it.qty * it.price;
+    rows.push([it.name, it.source, it.qty, it.price, sum]);
+    tQty += it.qty;
+    tSum += sum;
+  }
+
+  rows.push(['ИТОГО', '', tQty, '', tSum]);
+  var end = writeBlock_(sh, R + 1, rows);
+  sh.getRange(end - 1, 1, 1, 5).setFontWeight('bold');
+
+  // График: топ-10 наименований по сумме
+  if (rows.length > 2) {
+    var topRows = rows.slice(0, Math.min(10, rows.length - 1));
+    var chartData = [];
+    for (var i = 0; i < topRows.length; i++) {
+      chartData.push([topRows[i][0], topRows[i][4]]);
+    }
+    chartData.sort(function(a,b) { return b[1] - a[1]; });
+    var chartLabels = chartData.map(function(r) { return [r[0]]; });
+    var chartValues = chartData.map(function(r) { return [r[1]]; });
+
+    var labelR = sh.getRange(R + 1, 1, chartLabels.length, 1);
+    var valR = sh.getRange(R + 1, 5, chartValues.length, 1);
+    // Временно записываем данные для графика
+    for (var i = 0; i < chartLabels.length; i++) {
+      sh.getRange(R + 1 + i, 7).setValue(chartLabels[i][0]);
+      sh.getRange(R + 1 + i, 8).setValue(chartValues[i][0]);
+    }
+    var gLabels = sh.getRange(R + 1, 7, chartLabels.length, 1);
+    var gValues = sh.getRange(R + 1, 8, chartValues.length, 1);
+    buildChart_(sh, gLabels, [gValues], 'Топ-10 остатков по сумме', {type: 'bar', position: {row: 2, col: 7}});
+  }
+
+  SpreadsheetApp.getActiveSpreadsheet().toast('Текущие остатки: ' + list.length + ' позиций.', 'Отчёт', 3);
+}
+
+/**
+ * Полный расход по наименованиям — выдачи из Журналов М и Н за период.
+ * Столбцы: Наименование | Группа | Кол-во выдано | Сумма расхода
+ */
+function fullReportByName_(d1, d2) {
+  var sh = getSheet_(SHEET_FINANCE);
+  var R = FIRST_ROW;
+
+  sh.getRange(R, 1, 1, 4).setValues([
+    ['Наименование', 'Группа', 'Кол-во выдано', 'Сумма расхода']
+  ]).setFontWeight('bold').setBackground('#D9EAD3');
+
+  var data = {};
+
+  // Журнал М
+  var jm = getSheet_(SHEET_JOURNAL_M).getDataRange().getValues();
+  for (var i = 1; i < jm.length; i++) {
+    if (!inPeriod_(jm[i][COL_JM.DATE-1], d1, d2)) continue;
+    var name = txt_(jm[i][COL_JM.NAME-1]);
+    var qty = num_(jm[i][COL_JM.QUANTITY-1]);
+    if (!name || qty <= 0) continue;
+    var price = getIssuePriceM_(name, jm[i][COL_JM.SERIAL-1], jm[i][COL_JM.EXPIRY-1]);
+    if (!data[name]) data[name] = { qty: 0, sum: 0 };
+    data[name].qty += qty;
+    data[name].sum += qty * price;
+  }
+
+  // Журнал Н
+  var jn = getSheet_(SHEET_JOURNAL_N).getDataRange().getValues();
+  for (var i = 1; i < jn.length; i++) {
+    if (!inPeriod_(jn[i][COL_JN.DATE-1], d1, d2)) continue;
+    var name = txt_(jn[i][COL_JN.NAME-1]);
+    var qty = num_(jn[i][COL_JN.QUANTITY-1]);
+    if (!name || qty <= 0) continue;
+    var price = num_(jn[i][COL_JN.PRICE-1]);
+    if (!data[name]) data[name] = { qty: 0, sum: 0 };
+    data[name].qty += qty;
+    data[name].sum += qty * price;
+  }
+
+  var list = Object.keys(data).sort(function(a,b) { return a.localeCompare(b, 'ru'); });
+
+  var rows = [];
+  var tQty = 0, tSum = 0;
+  for (var i = 0; i < list.length; i++) {
+    var name = list[i];
+    var grp = groupFor_(name) || 'Без группы';
+    rows.push([name, grp, data[name].qty, data[name].sum]);
+    tQty += data[name].qty;
+    tSum += data[name].sum;
+  }
+
+  rows.push(['ИТОГО', '', tQty, tSum]);
+  var end = writeBlock_(sh, R + 1, rows);
+  sh.getRange(end - 1, 1, 1, 4).setFontWeight('bold');
+
+  // График: топ-10 наименований по сумме расхода
+  if (rows.length > 2) {
+    var topData = rows.slice(0, Math.min(10, rows.length - 1));
+    topData.sort(function(a,b) { return b[3] - a[3]; });
+    for (var i = 0; i < topData.length; i++) {
+      sh.getRange(R + 1 + i, 6).setValue(topData[i][0]);
+      sh.getRange(R + 1 + i, 7).setValue(topData[i][3]);
+    }
+    var gL = sh.getRange(R + 1, 6, topData.length, 1);
+    var gV = sh.getRange(R + 1, 7, topData.length, 1);
+    buildChart_(sh, gL, [gV], 'Топ-10 расход по наименованиям', {type: 'bar', position: {row: 2, col: 6}});
+  }
+
+  SpreadsheetApp.getActiveSpreadsheet().toast('Расход по наименованиям: ' + list.length + ' позиций.', 'Отчёт', 3);
+}
+
+/**
+ * Полный расход по группам — сводка по группам препаратов.
+ * Столбцы: Группа | Кол-во наименований | Кол-во выдано | Сумма расхода
+ */
+function fullReportByGroup_(d1, d2) {
+  var sh = getSheet_(SHEET_FINANCE);
+  var R = FIRST_ROW;
+
+  sh.getRange(R, 1, 1, 4).setValues([
+    ['Группа', 'Кол-во наименований', 'Кол-во выдано', 'Сумма расхода']
+  ]).setFontWeight('bold').setBackground('#D9EAD3');
+
+  var byGroup = {};
+
+  // Журнал М
+  var jm = getSheet_(SHEET_JOURNAL_M).getDataRange().getValues();
+  for (var i = 1; i < jm.length; i++) {
+    if (!inPeriod_(jm[i][COL_JM.DATE-1], d1, d2)) continue;
+    var name = txt_(jm[i][COL_JM.NAME-1]);
+    var qty = num_(jm[i][COL_JM.QUANTITY-1]);
+    if (!name || qty <= 0) continue;
+    var grp = groupFor_(name) || 'Без группы';
+    var price = getIssuePriceM_(name, jm[i][COL_JM.SERIAL-1], jm[i][COL_JM.EXPIRY-1]);
+    if (!byGroup[grp]) byGroup[grp] = { names: {}, qty: 0, sum: 0 };
+    byGroup[grp].names[name] = true;
+    byGroup[grp].qty += qty;
+    byGroup[grp].sum += qty * price;
+  }
+
+  // Журнал Н
+  var jn = getSheet_(SHEET_JOURNAL_N).getDataRange().getValues();
+  for (var i = 1; i < jn.length; i++) {
+    if (!inPeriod_(jn[i][COL_JN.DATE-1], d1, d2)) continue;
+    var name = txt_(jn[i][COL_JN.NAME-1]);
+    var qty = num_(jn[i][COL_JN.QUANTITY-1]);
+    if (!name || qty <= 0) continue;
+    var grp = groupFor_(name) || 'Без группы';
+    var price = num_(jn[i][COL_JN.PRICE-1]);
+    if (!byGroup[grp]) byGroup[grp] = { names: {}, qty: 0, sum: 0 };
+    byGroup[grp].names[name] = true;
+    byGroup[grp].qty += qty;
+    byGroup[grp].sum += qty * price;
+  }
+
+  var list = Object.keys(byGroup).sort(function(a,b) { return a.localeCompare(b, 'ru'); });
+
+  var rows = [];
+  var tNames = 0, tQty = 0, tSum = 0;
+  for (var i = 0; i < list.length; i++) {
+    var grp = list[i];
+    var namesCount = Object.keys(byGroup[grp].names).length;
+    rows.push([grp, namesCount, byGroup[grp].qty, byGroup[grp].sum]);
+    tNames += namesCount;
+    tQty += byGroup[grp].qty;
+    tSum += byGroup[grp].sum;
+  }
+
+  rows.push(['ИТОГО', tNames, tQty, tSum]);
+  var end = writeBlock_(sh, R + 1, rows);
+  sh.getRange(end - 1, 1, 1, 4).setFontWeight('bold');
+
+  // Круговая диаграмма: распределение расхода по группам
+  if (rows.length > 2) {
+    for (var i = 0; i < rows.length - 1; i++) {
+      sh.getRange(R + 1 + i, 6).setValue(rows[i][0]);
+      sh.getRange(R + 1 + i, 7).setValue(rows[i][3]);
+    }
+    var gL = sh.getRange(R + 1, 6, rows.length - 1, 1);
+    var gV = sh.getRange(R + 1, 7, rows.length - 1, 1);
+    buildChart_(sh, gL, [gV], 'Расход по группам', {type: 'pie', position: {row: 2, col: 6}});
+  }
+
+  SpreadsheetApp.getActiveSpreadsheet().toast('Расход по группам: ' + list.length + ' групп.', 'Отчёт', 3);
+}
+
+/**
+ * Расход по кабинетам — выдачи в каждый кабинет за период.
+ * Столбцы: Кабинет | Наименование | Кол-во | Сумма
+ */
+function reportByCabinet_(d1, d2) {
+  var sh = getSheet_(SHEET_FINANCE);
+  var R = FIRST_ROW;
+
+  sh.getRange(R, 1, 1, 4).setValues([
+    ['Кабинет', 'Наименование', 'Кол-во', 'Сумма']
+  ]).setFontWeight('bold').setBackground('#D9EAD3');
+
+  var byCabinet = {};
+
+  // Журнал М
+  var jm = getSheet_(SHEET_JOURNAL_M).getDataRange().getValues();
+  for (var i = 1; i < jm.length; i++) {
+    if (!inPeriod_(jm[i][COL_JM.DATE-1], d1, d2)) continue;
+    var name = txt_(jm[i][COL_JM.NAME-1]);
+    var cabinet = txt_(jm[i][COL_JM.CABINET-1]);
+    var qty = num_(jm[i][COL_JM.QUANTITY-1]);
+    if (!name || !cabinet || qty <= 0) continue;
+    var price = getIssuePriceM_(name, jm[i][COL_JM.SERIAL-1], jm[i][COL_JM.EXPIRY-1]);
+    if (!byCabinet[cabinet]) byCabinet[cabinet] = [];
+    var found = false;
+    for (var j = 0; j < byCabinet[cabinet].length; j++) {
+      if (byCabinet[cabinet][j].name === name) {
+        byCabinet[cabinet][j].qty += qty;
+        byCabinet[cabinet][j].sum += qty * price;
+        found = true;
+        break;
+      }
+    }
+    if (!found) byCabinet[cabinet].push({ name: name, qty: qty, sum: qty * price });
+  }
+
+  // Журнал Н
+  var jn = getSheet_(SHEET_JOURNAL_N).getDataRange().getValues();
+  for (var i = 1; i < jn.length; i++) {
+    if (!inPeriod_(jn[i][COL_JN.DATE-1], d1, d2)) continue;
+    var name = txt_(jn[i][COL_JN.NAME-1]);
+    var cabinet = txt_(jn[i][COL_JN.CABINET-1]);
+    var qty = num_(jn[i][COL_JN.QUANTITY-1]);
+    if (!name || !cabinet || qty <= 0) continue;
+    var price = num_(jn[i][COL_JN.PRICE-1]);
+    if (!byCabinet[cabinet]) byCabinet[cabinet] = [];
+    var found = false;
+    for (var j = 0; j < byCabinet[cabinet].length; j++) {
+      if (byCabinet[cabinet][j].name === name) {
+        byCabinet[cabinet][j].qty += qty;
+        byCabinet[cabinet][j].sum += qty * price;
+        found = true;
+        break;
+      }
+    }
+    if (!found) byCabinet[cabinet].push({ name: name, qty: qty, sum: qty * price });
+  }
+
+  var cabList = Object.keys(byCabinet).sort(function(a,b) { return a.localeCompare(b, 'ru'); });
+  var rows = [];
+  var tQty = 0, tSum = 0;
+
+  for (var c = 0; c < cabList.length; c++) {
+    var cab = cabList[c];
+    var items = byCabinet[cab];
+    items.sort(function(a,b) { return b.sum - a.sum; });
+    for (var j = 0; j < items.length; j++) {
+      rows.push([cab, items[j].name, items[j].qty, items[j].sum]);
+      tQty += items[j].qty;
+      tSum += items[j].sum;
+    }
+  }
+
+  rows.push(['ИТОГО', '', tQty, tSum]);
+  var end = writeBlock_(sh, R + 1, rows);
+  sh.getRange(end - 1, 1, 1, 4).setFontWeight('bold');
+
+  // График: сравнение кабинетов по сумме расхода
+  if (cabList.length > 0) {
+    var cabSums = {};
+    for (var i = 0; i < rows.length - 1; i++) {
+      var cab = rows[i][0];
+      if (cab === 'ИТОГО') continue;
+      if (!cabSums[cab]) cabSums[cab] = 0;
+      cabSums[cab] += rows[i][3];
+    }
+    var cabChart = Object.keys(cabSums).sort(function(a,b) { return cabSums[b] - cabSums[a]; });
+    for (var i = 0; i < cabChart.length; i++) {
+      sh.getRange(R + 1 + i, 6).setValue(cabChart[i]);
+      sh.getRange(R + 1 + i, 7).setValue(cabSums[cabChart[i]]);
+    }
+    var gL = sh.getRange(R + 1, 6, cabChart.length, 1);
+    var gV = sh.getRange(R + 1, 7, cabChart.length, 1);
+    buildChart_(sh, gL, [gV], 'Расход по кабинетам', {type: 'bar', position: {row: 2, col: 6}});
+  }
+
+  SpreadsheetApp.getActiveSpreadsheet().toast('Расход по кабинетам: ' + cabList.length + ' кабинетов.', 'Отчёт', 3);
+}
+
+/**
+ * Расход на просроченные — позиции с истёкшим сроком годности за период.
+ * Столбцы: Наименование | Серия | Срок годности | Кол-во | Сумма потерь
+ */
+function expiredExpenses_(d1, d2) {
+  var sh = getSheet_(SHEET_FINANCE);
+  var R = FIRST_ROW;
+
+  sh.getRange(R, 1, 1, 5).setValues([
+    ['Наименование', 'Серия', 'Срок годности', 'Кол-во', 'Сумма потерь']
+  ]).setFontWeight('bold').setBackground('#FFD9D9');
+
+  var rows = [];
+
+  // Из архива
+  var arch = getSheet_(SHEET_ARCHIVE).getDataRange().getValues();
+  for (var i = 1; i < arch.length; i++) {
+    var source = txt_(arch[i][COL_ARCH.SOURCE-1]);
+    var status = txt_(arch[i][COL_ARCH.STATUS-1]);
+    var reason = txt_(arch[i][COL_ARCH.REASON-1]);
+    var archDate = arch[i][COL_ARCH.DATE-1];
+
+    if (source !== 'Склад М') continue;
+    if (status !== 'Обычный') continue;
+    if (reason.indexOf('просрочен') === -1 && reason.indexOf('Просрочен') === -1) continue;
+    if (archDate instanceof Date && !inPeriod_(archDate, d1, d2)) continue;
+
+    var name = txt_(arch[i][COL_ARCH.NAME-1]);
+    var serial = txt_(arch[i][COL_ARCH.SERIAL-1]);
+    var expiry = arch[i][COL_ARCH.EXPIRY-1];
+    var qty = num_(arch[i][COL_ARCH.QTY-1]);
+    var price = num_(arch[i][COL_ARCH.PRICE-1]);
+    if (!name || qty <= 0) continue;
+    rows.push([name, serial || '-', expiry instanceof Date ? formatDate_(expiry) : '-', qty, qty * price]);
+  }
+
+  // Из Склада М — ещё не архивированные
+  var stockM = getSheet_(SHEET_STOCK_M).getDataRange().getValues();
+  var today = new Date(); today.setHours(0,0,0,0);
+  for (var i = 1; i < stockM.length; i++) {
+    var exp = stockM[i][COL_M.EXPIRY-1];
+    if (!(exp instanceof Date)) continue;
+    if (exp >= today) continue;
+    if (!inPeriod_(exp, d1, d2)) continue;
+    var name = txt_(stockM[i][COL_M.NAME-1]);
+    var serial = txt_(stockM[i][COL_M.SERIAL-1]);
+    var qty = num_(stockM[i][COL_M.BALANCE-1]);
+    var price = num_(stockM[i][COL_M.PRICE-1]);
+    if (!name || qty <= 0) continue;
+    rows.push([name, serial || '-', formatDate_(exp), qty, qty * price]);
+  }
+
+  // Убираем дубли
+  var unique = {};
+  var deduped = [];
+  for (var i = 0; i < rows.length; i++) {
+    var key = rows[i][0] + '|' + rows[i][1] + '|' + rows[i][2];
+    if (!unique[key]) { unique[key] = true; deduped.push(rows[i]); }
+  }
+  rows = deduped;
+
+  var tQty = 0, tSum = 0;
+  for (var i = 0; i < rows.length; i++) { tQty += rows[i][3]; tSum += rows[i][4]; }
+
+  if (rows.length === 0) {
+    sh.getRange(R + 1, 1).setValue('Просроченных позиций за период не найдено.').setFontStyle('italic');
+    SpreadsheetApp.getActiveSpreadsheet().toast('Просроченных нет.', 'Отчёт', 3);
+    return;
+  }
+
+  rows.push(['ИТОГО', '', '', tQty, tSum]);
+  var end = writeBlock_(sh, R + 1, rows);
+  sh.getRange(end - 1, 1, 1, 5).setFontWeight('bold');
+  sh.getRange(end - 1, 5).setBackground('#FF6B6B').setFontColor('#FFFFFF');
+
+  // График: потери по наименованиям
+  if (rows.length > 2) {
+    var topData = rows.slice(0, Math.min(10, rows.length - 1));
+    topData.sort(function(a,b) { return b[4] - a[4]; });
+    for (var i = 0; i < topData.length; i++) {
+      sh.getRange(R + 1 + i, 7).setValue(topData[i][0]);
+      sh.getRange(R + 1 + i, 8).setValue(topData[i][4]);
+    }
+    var gL = sh.getRange(R + 1, 7, topData.length, 1);
+    var gV = sh.getRange(R + 1, 8, topData.length, 1);
+    buildChart_(sh, gL, [gV], 'Потери от просроченных', {type: 'bar', position: {row: 2, col: 7}});
+  }
+
+  SpreadsheetApp.getActiveSpreadsheet().toast('Просроченных: ' + rows.length + ' позиций, потери: ' + tSum.toFixed(2), 'Отчёт', 5);
+}
+
+/**
+ * Изменение цен за период — сравнение цен поступлений.
+ * Столбцы: Наименование | Группа | Мин. цена | Макс. цена | Средняя | Кол-во поступлений
+ */
+function priceChangesReport_(d1, d2) {
+  var sh = getSheet_(SHEET_FINANCE);
+  var R = FIRST_ROW;
+
+  sh.getRange(R, 1, 1, 14).setValues([
+    ['Наименование', 'Группа', 'Закупок', 'Первая цена', 'Последняя', 'Дельта ₽', 'Дельта %',
+     'Мин. цена', 'Макс. цена', 'Средняя', 'Поставщик (мин)', 'Цена (мин)', 'Поставщик (макс)', 'Цена (макс)']
+  ]).setFontWeight('bold').setBackground('#1a237e').setFontColor('#FFFFFF');
+
+  // Собираем все закупки: name => [{date, price, supplier, qty}]
+  var purchases = {};
+
+  var stockM = getSheet_(SHEET_STOCK_M).getDataRange().getValues();
+  for (var i = 1; i < stockM.length; i++) {
+    if (!inPeriod_(stockM[i][COL_M.DATE-1], d1, d2)) continue;
+    var name = txt_(stockM[i][COL_M.NAME-1]);
+    var price = num_(stockM[i][COL_M.PRICE-1]);
+    var supplier = txt_(stockM[i][COL_M.SUPPLIER-1]) || 'Неизвестен';
+    var date = stockM[i][COL_M.DATE-1];
+    var qty = num_(stockM[i][COL_M.QTY-1]);
+    if (!name || price <= 0) continue;
+    if (!purchases[name]) purchases[name] = [];
+    purchases[name].push({date: date, price: price, supplier: supplier, qty: qty});
+  }
+
+  var stockN = getSheet_(SHEET_STOCK_N).getDataRange().getValues();
+  for (var i = 1; i < stockN.length; i++) {
+    if (!inPeriod_(stockN[i][COL_N.DATE-1], d1, d2)) continue;
+    var name = txt_(stockN[i][COL_N.NAME-1]);
+    var price = num_(stockN[i][COL_N.PRICE-1]);
+    var supplier = txt_(stockN[i][COL_N.SUPPLIER-1]) || 'Неизвестен';
+    var date = stockN[i][COL_N.DATE-1];
+    var qty = num_(stockN[i][COL_N.QTY-1]);
+    if (!name || price <= 0) continue;
+    if (!purchases[name]) purchases[name] = [];
+    purchases[name].push({date: date, price: price, supplier: supplier, qty: qty});
+  }
+
+  var list = Object.keys(purchases).sort(function(a,b) { return a.localeCompare(b, 'ru'); });
+
+  if (list.length === 0) {
+    sh.getRange(R + 1, 1).setValue('Поступлений за период не найдено.').setFontStyle('italic');
+    return;
+  }
+
+  var rows = [];
+  for (var i = 0; i < list.length; i++) {
+    var name = list[i];
+    var plist = purchases[name];
+    var grp = groupFor_(name) || 'Без группы';
+
+    // Сортируем по дате
+    plist.sort(function(a,b) {
+      var da = a.date instanceof Date ? a.date.getTime() : 0;
+      var db = b.date instanceof Date ? b.date.getTime() : 0;
+      return da - db;
+    });
+
+    var firstPrice = plist[0].price;
+    var lastPrice = plist[plist.length - 1].price;
+    var delta = lastPrice - firstPrice;
+    var deltaPct = firstPrice > 0 ? ((delta / firstPrice) * 100) : 0;
+
+    var min = Infinity, max = 0, sum = 0;
+    var minSupplier = '', maxSupplier = '', minPrice = 0, maxPrice = 0;
+
+    for (var j = 0; j < plist.length; j++) {
+      sum += plist[j].price;
+      if (plist[j].price < min) {
+        min = plist[j].price;
+        minSupplier = plist[j].supplier;
+        minPrice = plist[j].price;
+      }
+      if (plist[j].price > max) {
+        max = plist[j].price;
+        maxSupplier = plist[j].supplier;
+        maxPrice = plist[j].price;
+      }
+    }
+    var avg = sum / plist.length;
+
+    rows.push([
+      name, grp, plist.length,
+      firstPrice, lastPrice, delta, deltaPct,
+      min, max, avg,
+      minSupplier, minPrice, maxSupplier, maxPrice
+    ]);
+  }
+
+  var end = writeBlock_(sh, R + 1, rows);
+
+  // Подсветка: дельта % — зелёный (подешевело), красный (подорожало)
+  for (var r = R + 1; r < end; r++) {
+    var deltaPctVal = sh.getRange(r, 7).getValue();
+    if (deltaPctVal > 5) {
+      sh.getRange(r, 5, 1, 3).setBackground('#FFCDD2').setFontColor('#C62828'); // подорожало
+    } else if (deltaPctVal < -5) {
+      sh.getRange(r, 5, 1, 3).setBackground('#C8E6C9').setFontColor('#2E7D32'); // подешевело
+    }
+  }
+
+  // График: дельта % топ-10 по абсолютному изменению
+  var chartRows = rows.slice();
+  chartRows.sort(function(a,b) { return Math.abs(b[6]) - Math.abs(a[6]); });
+  var topChart = chartRows.slice(0, Math.min(10, chartRows.length));
+
+  if (topChart.length > 0) {
+    for (var i = 0; i < topChart.length; i++) {
+      sh.getRange(R + 1 + i, 16).setValue(topChart[i][0]);
+      sh.getRange(R + 1 + i, 17).setValue(topChart[i][6]);
+    }
+    var gL = sh.getRange(R + 1, 16, topChart.length, 1);
+    var gV = sh.getRange(R + 1, 17, topChart.length, 1);
+    buildChart_(sh, gL, [gV], 'Изменение цен (%): топ-10 по колебанию', {type: 'bar', position: {row: 2, col: 16}});
+  }
+
+  SpreadsheetApp.getActiveSpreadsheet().toast('Изменение цен: ' + list.length + ' наименований.', 'Отчёт', 3);
+}
+
+/**
+ * Изменение цен по группам — сводка колебаний цен в разрезе групп.
+ * Столбцы: Группа | Кол-во наименований | Мин. цена | Макс. цена | Средняя | Кол-во поступлений
+ */
+function groupPriceChangesReport_(d1, d2) {
+  var sh = getSheet_(SHEET_FINANCE);
+  var R = FIRST_ROW;
+
+  sh.getRange(R, 1, 1, 10).setValues([
+    ['Группа', 'Наименований', 'Закупок', 'Общая сумма', 'Средняя цена',
+     'Мин. средняя', 'Макс. средняя', 'Доля %', 'Тренд', 'Изм. средней %']
+  ]).setFontWeight('bold').setBackground('#1a237e').setFontColor('#FFFFFF');
+
+  // Собираем данные: name => {prices: [], supplier: {min: {price, name}, max: {price, name}}}
+  var items = {};
+
+  var stockM = getSheet_(SHEET_STOCK_M).getDataRange().getValues();
+  for (var i = 1; i < stockM.length; i++) {
+    if (!inPeriod_(stockM[i][COL_M.DATE-1], d1, d2)) continue;
+    var name = txt_(stockM[i][COL_M.NAME-1]);
+    var price = num_(stockM[i][COL_M.PRICE-1]);
+    var date = stockM[i][COL_M.DATE-1];
+    if (!name || price <= 0) continue;
+    if (!items[name]) items[name] = { prices: [], dates: [] };
+    items[name].prices.push(price);
+    items[name].dates.push(date);
+  }
+
+  var stockN = getSheet_(SHEET_STOCK_N).getDataRange().getValues();
+  for (var i = 1; i < stockN.length; i++) {
+    if (!inPeriod_(stockN[i][COL_N.DATE-1], d1, d2)) continue;
+    var name = txt_(stockN[i][COL_N.NAME-1]);
+    var price = num_(stockN[i][COL_N.PRICE-1]);
+    var date = stockN[i][COL_N.DATE-1];
+    if (!name || price <= 0) continue;
+    if (!items[name]) items[name] = { prices: [], dates: [] };
+    items[name].prices.push(price);
+    items[name].dates.push(date);
+  }
+
+  // Группируем по группам
+  var byGroup = {};
+  var nameList = Object.keys(items);
+  for (var i = 0; i < nameList.length; i++) {
+    var name = nameList[i];
+    var grp = groupFor_(name) || 'Без группы';
+    var it = items[name];
+
+    if (!byGroup[grp]) byGroup[grp] = { names: {}, totalSpend: 0, totalCount: 0, avgPrices: [] };
+
+    byGroup[grp].names[name] = true;
+    byGroup[grp].totalCount += it.prices.length;
+
+    // Средняя цена для этого наименования
+    var nameSum = 0;
+    for (var j = 0; j < it.prices.length; j++) nameSum += it.prices[j];
+    var nameAvg = nameSum / it.prices.length;
+    byGroup[grp].avgPrices.push(nameAvg);
+    byGroup[grp].totalSpend += nameSum;
+  }
+
+  var grpList = Object.keys(byGroup).sort(function(a,b) { return a.localeCompare(b, 'ru'); });
+
+  if (grpList.length === 0) {
+    sh.getRange(R + 1, 1).setValue('Поступлений за период не найдено.').setFontStyle('italic');
+    return;
+  }
+
+  // Общая сумма всех закупок
+  var grandTotal = 0;
+  for (var i = 0; i < grpList.length; i++) {
+    grandTotal += byGroup[grpList[i]].totalSpend;
+  }
+
+  var rows = [];
+  for (var i = 0; i < grpList.length; i++) {
+    var grp = grpList[i];
+    var gd = byGroup[grp];
+    var namesCount = Object.keys(gd.names).length;
+
+    // Средняя цена по группе (среднее от средних)
+    var groupAvg = 0;
+    for (var j = 0; j < gd.avgPrices.length; j++) groupAvg += gd.avgPrices[j];
+    groupAvg = gd.avgPrices.length > 0 ? groupAvg / gd.avgPrices.length : 0;
+
+    // Мин и макс средняя цена в группе
+    var minAvg = Infinity, maxAvg = 0;
+    for (var j = 0; j < gd.avgPrices.length; j++) {
+      if (gd.avgPrices[j] < minAvg) minAvg = gd.avgPrices[j];
+      if (gd.avgPrices[j] > maxAvg) maxAvg = gd.avgPrices[j];
+    }
+    if (minAvg === Infinity) minAvg = 0;
+
+    // Доля от общих затрат
+    var sharePct = grandTotal > 0 ? (gd.totalSpend / grandTotal * 100) : 0;
+
+    // Тренд: сравниваем первую и вторую половину цен
+    var allPrices = gd.avgPrices;
+    var trend = '—';
+    var trendChange = 0;
+    if (allPrices.length >= 2) {
+      var mid = Math.floor(allPrices.length / 2);
+      var firstHalf = 0, secondHalf = 0;
+      for (var j = 0; j < mid; j++) firstHalf += allPrices[j];
+      for (var j = mid; j < allPrices.length; j++) secondHalf += allPrices[j];
+      firstHalf = mid > 0 ? firstHalf / mid : 0;
+      secondHalf = (allPrices.length - mid) > 0 ? secondHalf / (allPrices.length - mid) : 0;
+      trendChange = firstHalf > 0 ? ((secondHalf - firstHalf) / firstHalf * 100) : 0;
+      if (trendChange > 5) trend = 'Рост';
+      else if (trendChange < -5) trend = 'Снижение';
+      else trend = 'Стабильно';
+    }
+
+    rows.push([
+      grp, namesCount, gd.totalCount, gd.totalSpend, groupAvg,
+      minAvg, maxAvg, sharePct, trend, trendChange
+    ]);
+  }
+
+  // Сортируем по общей сумме (самые дорогие сверху)
+  rows.sort(function(a,b) { return b[3] - a[3]; });
+
+  var end = writeBlock_(sh, R + 1, rows);
+
+  // Подсветка тренда
+  for (var r = R + 1; r < end; r++) {
+    var trendVal = sh.getRange(r, 9).getValue();
+    var trendChangeVal = sh.getRange(r, 10).getValue();
+    if (trendVal === 'Рост') {
+      sh.getRange(r, 9).setBackground('#FFCDD2').setFontColor('#C62828');
+      sh.getRange(r, 10).setBackground('#FFCDD2').setFontColor('#C62828');
+    } else if (trendVal === 'Снижение') {
+      sh.getRange(r, 9).setBackground('#C8E6C9').setFontColor('#2E7D32');
+      sh.getRange(r, 10).setBackground('#C8E6C9').setFontColor('#2E7D32');
+    } else {
+      sh.getRange(r, 9).setBackground('#E3F2FD').setFontColor('#1565C0');
+    }
+  }
+
+  // График: общая сумма по группам (столбчатый)
+  if (rows.length > 0) {
+    for (var i = 0; i < rows.length; i++) {
+      sh.getRange(R + 1 + i, 12).setValue(rows[i][0]);
+      sh.getRange(R + 1 + i, 13).setValue(rows[i][3]);
+    }
+    var gL = sh.getRange(R + 1, 12, rows.length, 1);
+    var gV = sh.getRange(R + 1, 13, rows.length, 1);
+    buildChart_(sh, gL, [gV], 'Затраты по группам (общая сумма)', {type: 'bar', position: {row: 2, col: 12}});
+  }
+
+  SpreadsheetApp.getActiveSpreadsheet().toast('Изменение цен по группам: ' + grpList.length + ' групп.', 'Отчёт', 3);
+}
+
+// ============================================================
+//  МОДУЛЬ: Backup
+// ============================================================
+
+function createBackup() {
+  var lock = acquireLock_();
+  if (!lock) {
+    console.warn('createBackup: не удалось получить блокировку');
+    return;
+  }
+
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var backupName = ss.getName() + '_Backup_' + formatDate_(new Date()).replace(/\./g, '-');
+    var backup = DriveApp.getFileById(ss.getId()).makeCopy(backupName);
+    console.log('Бэкап создан: ' + backup.getUrl());
+    auditLog_('BACKUP', 'DRIVE', 0, 0, '', '', 'Бэкап: ' + backup.getUrl());
+  } catch(e) {
+    console.error('Ошибка создания бэкапа: ' + e.message);
+  } finally {
+    releaseLock_(lock);
+  }
+}
