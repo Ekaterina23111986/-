@@ -1,9 +1,13 @@
 /**
- * МЕДИЦИНСКАЯ ТАБЛИЦА v13
+ * МЕДИЦИНСКАЯ ТАБЛИЦА v14
  * Справочник 29н = ИСТОЧНИК ДАННЫХ. Скрипт ЧИТАЕТ его при пересчёте.
  * Можно дополнять/удалять строки в справочнике.
  *
  * ЗАПУСК: МедТаблица > Создать структуру (или Пересчитать формулы)
+ *
+ * v14: Добавлены столбцы P-S, столбец O изменён на "Коридор обучения"
+ *      с условным форматированием (жёлтый за 1 год, красный за 6 мес до окончания).
+ *      51 строка (как в оригинале).
  */
 
 function ensureSheet(ss,n){var sh=ss.getSheetByName(n);if(!sh)sh=ss.insertSheet(n);return sh;}
@@ -31,11 +35,38 @@ var BASE=[
 ["\u041f\u0441\u0438\u0445\u0438\u0430\u0442\u0440","\u0412\u0440\u0430\u0447-\u043f\u0441\u0438\u0445\u0438\u0430\u0442\u0440","",0,0,"\u0412\u0441\u0435"],
 ["\u041d\u0430\u0440\u043a\u043e\u043b\u043e\u0433","\u0412\u0440\u0430\u0447-\u043d\u0430\u0440\u043a\u043e\u043b\u043e\u0433","",0,0,"\u0412\u0441\u0435"],
 ["\u0413\u0438\u043d\u0435\u043a\u043e\u043b\u043e\u0433","\u0412\u0440\u0430\u0447-\u0430\u043a\u0443\u0448\u0435\u0440-\u0433\u0438\u043d\u0435\u043a\u043e\u043b\u043e\u0433","\u0411\u0430\u043a\u0442. \u0438\u0441\u0441\u043b. (\u043d\u0430 \u0444\u043b\u043e\u0440\u0443), \u0426\u0438\u0442\u043e\u043b. \u0438\u0441\u0441\u043b. (\u043d\u0430 \u0430\u0442\u0438\u043f.), \u0423\u0417\u0418 \u043c\u0430\u043b\u043e\u0433\u043e \u0442\u0430\u0437\u0430",0,0,"\u0416"],
-["\u041c\u0430\u043c\u043c\u043e\u0433\u0440\u0430\u0444\u0438\u044f","","\u041c\u0430\u043c\u043c\u043e\u0433\u0440\u0430\u0444\u0438\u044f \u043c\u043e\u043b\u043e\u0447\u043d. \u0436\u0435\u043b\u0435\u0437 \u0432 2 \u043f\u0440\u043e\u0435\u043a\u0446.",41,0,"\u0416"],
+["\u041c\u0430\u043c\u043c\u043e\u0433\u0440\u0430\u0444\u0438\u043a\u0430","","\u041c\u0430\u043c\u043c\u043e\u0433\u0440\u0430\u0444\u0438\u043a\u0430 \u043c\u043e\u043b\u043e\u0447\u043d. \u0436\u0435\u043b\u0435\u0437 \u0432 2 \u043f\u0440\u043e\u0435\u043a\u0446.",41,0,"\u0416"],
 ["\u0413\u0435\u043f\u0430\u0442\u0438\u0442 \u0412\u0421","","\u0413\u0435\u043f\u0430\u0442\u0438\u0442 \u0412 \u0438 \u0421 (\u043f.767 \u0421\u0430\u043d\u041f\u0418\u041d)",0,0,"\u0412\u0441\u0435"]
 ];
 
-var TH=["\u0424\u0418\u041e","\u0414\u043e\u043b\u0436\u043d\u043e\u0441\u0442\u044c","\u041e\u0441\u043d./\u0421\u043e\u0432\u043c.","\u0421\u0442\u0430\u0432\u043a\u0430","\u0421\u043f\u0435\u0446.","\u0414\u0430\u0442\u0430 \u043e\u0431\u0443\u0447.","\u2116 \u0434\u0438\u043f\u043b.","\u041d\u0430\u0438\u043c. \u043e\u0431\u0443\u0447.","\u0414\u0430\u0442\u0430 \u0430\u043a\u043a\u0440.","\u0422\u0438\u043f \u0430\u043a\u043a\u0440.","\u0421\u043b\u0435\u0434. \u0430\u043a\u043a\u0440.(\u0430\u0432\u0442\u043e)","\u0423\u0432\u0435\u0434\u043e\u043c\u043b.","\u041f\u043b\u0430\u043d. \u0434\u0430\u0442\u0430 \u043e\u0431\u0443\u0447.","\u041e\u0441\u0442. \u0434\u043e \u043e\u0431\u0443\u0447."];
+// =====================================================
+// ЗАГОЛОВКИ — 19 колонок A..S
+// =====================================================
+var TH=[
+  "\u0424\u0418\u041e",                                          // A: ФИО
+  "\u0414\u043e\u043b\u0436\u043d\u043e\u0441\u0442\u044c",       // B: Должность
+  "\u041e\u0441\u043d./\u0421\u043e\u0432\u043c.",                // C: Осн./Совм.
+  "\u0421\u0442\u0430\u0432\u043a\u0430",                         // D: Ставка
+  "\u0421\u043f\u0435\u0446.",                                    // E: Спец.
+  "\u0414\u0430\u0442\u0430 \u043e\u0431\u0443\u0447.",           // F: Дата обуч.
+  "\u2116 \u0434\u0438\u043f\u043b.",                             // G: № дипл.
+  "\u041d\u0430\u0438\u043c. \u043e\u0431\u0443\u0447.",         // H: Наим. обуч.
+  "\u0414\u0430\u0442\u0430 \u0430\u043a\u043a\u0440.",          // I: Дата аккр.
+  "\u0422\u0438\u043f \u0430\u043a\u043a\u0440.",                 // J: Тип аккр.
+  "\u0421\u043b\u0435\u0434. \u0430\u043a\u043a\u0440.(\u0430\u0432\u0442\u043e)", // K: След. аккр.(авто)
+  "\u041e\u0441\u0442. \u0434\u043e \u0430\u043a\u043a\u0440.",   // L: Ост. до аккр. (без изменений!)
+  "\u0423\u0432\u0435\u0434\u043e\u043c\u043b.",                  // M: Уведомл.
+  "\u041f\u043b\u0430\u043d. \u0434\u0430\u0442\u0430 \u043e\u0431\u0443\u0447.", // N: План. дата обуч.
+  "\u041a\u043e\u0440\u0438\u0434\u043e\u0440 \u043e\u0431\u0443\u0447\u0435\u043d\u0438\u044f", // O: Коридор обучения (НОВОЕ!)
+  "\u0414\u043e\u043f. \u0441\u0432\u0435\u0434.",                // P: Доп. сведения (НОВОЕ!)
+  "\u041e\u0431\u0443\u0447. \u043c\u0435\u0434. \u043e\u0442\u0445\u043e\u0434\u044b", // Q: Обуч. мед. отходы (НОВОЕ!)
+  "\u041e\u0431\u0443\u0447. \u043e\u0445\u0440\u0430\u043d\u0430 \u0442\u0440\u0443\u0434\u0430", // R: Обуч. охрана труда (НОВОЕ!)
+  "\u041e\u0431\u0443\u0447. \u043f\u043e\u0436\u0430\u0440\u043d. \u0431\u0435\u0437\u043e\u043f\u0430\u0441\u043d."  // S: Обуч. пожарн. безопасность (НОВОЕ!)
+];
+
+// Ширины колонок (19 штук, A..S)
+var COL_WIDTHS=[200,150,120,60,150,120,150,200,120,110,130,170,320,130,200,200,130,130,130];
+
 var EH=["\u0424\u0418\u041e","\u0414\u0430\u0442\u0430 \u0440\u043e\u0436\u0434.","\u0412\u043e\u0437\u0440\u0430\u0441\u0442","\u0421\u041d\u0418\u041b\u0421","\u0410\u0434\u0440\u0435\u0441","\u041f\u043e\u043b","\u0414\u043e\u043b\u0436\u043d\u043e\u0441\u0442\u044c","\u041e\u0441\u043d./\u0421\u043e\u0432\u043c."];
 var EV=["\u041a\u043e\u0440\u044c(1)","\u041a\u043e\u0440\u044c(2)","\u041a\u0440\u0430\u0441\u043d\u0443\u0445\u0430","\u0413\u0435\u043f.\u0412(V1)","\u0413\u0435\u043f.\u0412(V2)","\u0413\u0435\u043f.\u0412(V3)","\u0410\u041a\u0414\u0421(1)","\u0410\u041a\u0414\u0421(2)","\u0413\u0440\u0438\u043f\u043f"];
 var ED=["\u0414\u0430\u0442\u0430 \u043f\u043e\u0441\u043b.\u043f\u0440\u043e\u0444\u043e\u0441\u043c.","\u041f\u043b\u0430\u043d.\u0434\u0430\u0442\u0430(\u0430\u0432\u0442\u043e)","\u041e\u0441\u0442.\u0434\u043e \u043f\u0440\u043e\u0444\u043e\u0441\u043c."];
@@ -44,7 +75,6 @@ var ER=["\u0421\u043f\u0435\u0446.(\u0430\u0432\u0442\u043e)","\u0418\u0441\u044
 var NM_REF="\u0421\u043f\u0440\u0430\u0432\u043e\u0447\u043d\u0438\u043a 29\u043d";
 var NM_LOCS=["\u0413\u0430\u043c\u0430\u043b\u0435\u0438","\u041a\u0438\u0435\u0432\u0441\u043a\u0430\u044f","\u0421\u041f\u0411"];
 
-// Глобальный кэш данных из справочника (обновляется при каждом пересчёте)
 var _pktCache = [];
 
 function putFormula(c,f){c.clearFormat();c.setFormula(f);}
@@ -55,13 +85,14 @@ function putFormula(c,f){c.clearFormat();c.setFormula(f);}
 function onOpen(){
   SpreadsheetApp.getUi().createMenu("\uD83C\uDFE5 \u041c\u0435\u0434\u0422\u0430\u0431\u043b\u0438\u0446\u0430")
     .addItem("\u2705 \u0421\u043e\u0437\u0434\u0430\u0442\u044c \u0441\u0442\u0440\u0443\u043a\u0442\u0443\u0440\u0443","runCreate")
+    .addItem("\u2b06 \u0414\u043e\u0441\u0442\u0440\u043e\u0438\u0442\u044c \u043d\u043e\u0432\u044b\u0435 \u0441\u0442\u043e\u043b\u0431\u0446\u044b O-S","addNewColumns")
     .addItem("\uD83D\uDD04 \u041f\u0435\u0440\u0435\u0441\u0447\u0438\u0442\u0430\u0442\u044c \u0444\u043e\u0440\u043c\u0443\u043b\u044b","runFormulasOnly")
     .addItem("\uD83D\uDC41 \u0421\u043f\u0440\u0430\u0432\u043e\u0447\u043d\u0438\u043a: \u043f\u043e\u043a\u0430\u0437\u0430\u0442\u044c/\u0441\u043a\u0440\u044b\u0442\u044c","toggleRef")
     .addToUi();
 }
 
 // =====================================================
-// ЧТЕНИЕ ДАННЫХ ИЗ СПРАВОЧНИКА (источник правды)
+// ЧТЕНИЕ ДАННЫХ ИЗ СПРАВОЧНИКА
 // =====================================================
 function loadRefData(ss) {
   _pktCache = [];
@@ -70,15 +101,12 @@ function loadRefData(ss) {
   var last = sh.getLastRow();
   if (last < 2) return;
   var data = sh.getRange(1, 1, last, 5).getValues();
-  // data[0] = заголовки
-  // data[1..] = строки: [Код, Раздел, Наименование, Специалисты, Исследования]
   for (var i = 1; i < data.length; i++) {
     var code = data[i][0];
     var section = data[i][1];
     var name = data[i][2];
     var spec = data[i][3];
     var tests = data[i][4];
-    // Пропускаем пустые строки и заголовки разделов (начинаются с "▶")
     if (!code || code === "" || (typeof code === "string" && code.indexOf("\u25B6") === 0)) continue;
     if (!section || section === "") continue;
     _pktCache.push({
@@ -91,7 +119,6 @@ function loadRefData(ss) {
   }
 }
 
-// Строим выпадающие списки по разделам
 function buildListsBySection() {
   var result = {};
   _pktCache.forEach(function(item) {
@@ -103,7 +130,7 @@ function buildListsBySection() {
 }
 
 // =====================================================
-// СПРАВОЧНИК 29н (создаётся один раз)
+// СПРАВОЧНИК 29н
 // =====================================================
 function createRef(ss){
   var sh = ensureSheet(ss, NM_REF);
@@ -114,7 +141,6 @@ function createRef(ss){
   sh.getRange("A1:E1").setFontWeight("bold").setBackground("#1A73E8").setFontColor("#fff").setWrap(true).setHorizontalAlignment("center");
   sh.setRowHeight(1, 40);
 
-  // Секции для наглядности
   var sections = [
     {sec:"VI.\u0412\u044b\u043f. \u0440\u0430\u0431\u043e\u0442\u044b", items:[
       ["\u043f.6","\u0420\u0430\u0431\u043e\u0442\u044b \u043d\u0430 \u0432\u044b\u0441\u043e\u0442\u0435","\u0412\u0440\u0430\u0447-\u043e\u0442\u043e\u0440., \u0412\u0440\u0430\u0447-\u043e\u0444\u0442., \u0412\u0440\u0430\u0447-\u0445\u0438\u0440.","\u0412\u0435\u0441\u0442\u0438\u0431., \u0410\u0443\u0434., \u041f\u0435\u0440\u0438\u043c., \u0411\u0438\u043e\u043c., \u0412\u0438\u0437\u043e\u043c."],
@@ -161,37 +187,29 @@ function createRef(ss){
   sh.setColumnWidth(5, 500);
   sh.setFrozenRows(1);
   sh.setFrozenColumns(1);
-
-  // Подсказка
   sh.getRange(1, 1).setNote("\u0412\u044b \u043c\u043e\u0436\u0435\u0442\u0435 \u0434\u043e\u043f\u043e\u043b\u043d\u044f\u0442\u044c/\u0443\u0434\u0430\u043b\u044f\u0442\u044c \u0441\u0442\u0440\u043e\u043a\u0438. \u041f\u043e\u0441\u043b\u0435 \u0438\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0439 \u043d\u0430\u0436\u043c\u0438\u0442\u0435 \u00AB\u041f\u0435\u0440\u0435\u0441\u0447\u0438\u0442\u0430\u0442\u044c \u0444\u043e\u0440\u043c\u0443\u043b\u044b\u00BB.");
 }
 
 // =====================================================
-// ПЕРЕСЧЁТ ФОРМУЛ (читает справочник)
+// ПЕРЕСЧЁТ ФОРМУЛ
 // =====================================================
 function runFormulasOnly() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   if (!ss) return;
-
-  // 1. Загружаем данные из справочника
   loadRefData(ss);
-
-  // 2. Строим выпадающие списки по разделам
   var lists = buildListsBySection();
   var allSections = Object.keys(lists);
-
-  // 3. Обновляем формулы во всех листах
   ss.getSheets().forEach(function(sh) {
     var nm = sh.getName();
     if (nm.indexOf("\u043e\u0431\u0443\u0447\u0435\u043d\u0438\u0435") !== -1) {
       setTrainFormulas(sh);
+      setTrainCondFmt(sh);
     }
     if (nm.indexOf("\u043f\u0440\u043e\u0444 \u043e\u0441\u043c\u043e\u0442\u0440") !== -1) {
       setExamFormulas(sh);
       updateExamDropdowns(sh, lists, allSections);
     }
   });
-
   SpreadsheetApp.getUi().alert("\u2705 \u0424\u043e\u0440\u043c\u0443\u043b\u044b \u043f\u0435\u0440\u0435\u0441\u0447\u0438\u0442\u0430\u043d\u044b \u0438\u0437 \u0441\u043f\u0440\u0430\u0432\u043e\u0447\u043d\u0438\u043a\u0430!");
 }
 
@@ -202,15 +220,11 @@ function runCreate() {
   var ui = SpreadsheetApp.getUi();
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   if (!ss) { ui.alert("\u274c \u0417\u0430\u043f\u0443\u0441\u0442\u0438\u0442\u0435 \u0438\u0437 \u043c\u0435\u043d\u044e \u0442\u0430\u0431\u043b\u0438\u0446\u044b."); return; }
-
   ui.alert("\u0421\u043e\u0437\u0434\u0430\u043d\u0438\u0435...", "\u0411\u0443\u0434\u0435\u0442 \u0441\u043e\u0437\u0434\u0430\u043d\u043e 7 \u043b\u0438\u0441\u0442\u043e\u0432.\n\u0421\u0443\u0449\u0435\u0441\u0442\u0432\u0443\u044e\u0449\u0438\u0435 \u0434\u0430\u043d\u043d\u044b\u0435 \u0421\u041e\u0425\u0420\u0410\u041d\u042f\u042e\u0422\u0421\u042f.", ui.ButtonSet.OK);
-
   createRef(ss);
   NM_LOCS.forEach(function(l) { createTrain(ss, l); });
   NM_LOCS.forEach(function(l) { createExam(ss, l); });
   addTriggerSafe(ss);
-
-  // Загружаем данные и пересчитываем
   loadRefData(ss);
   var lists = buildListsBySection();
   var allSections = Object.keys(lists);
@@ -220,52 +234,163 @@ function runCreate() {
       updateExamDropdowns(sh, lists, allSections);
     }
   });
-
   ss.setActiveSheet(ss.getSheetByName(NM_REF));
   ui.alert("\u2705 \u0413\u043e\u0442\u043e\u0432\u043e!");
 }
 
 // =====================================================
-// ОБУЧЕНИЕ
+// ОБУЧЕНИЕ — 19 колонок, 51 строка
 // =====================================================
 function createTrain(ss, loc) {
   var sh = ensureSheet(ss, loc + " \u043e\u0431\u0443\u0447\u0435\u043d\u0438\u0435");
   sh.setTabColor("#4285F4");
-  ensureHeaders(sh, TH);
-  [200,150,120,60,150,120,150,200,120,110,130,170,320,130,280].forEach(function(v,i){sh.setColumnWidth(i+1,v);});
+
+  var isNew = sh.getRange(1, 1).getValue() === "";
+  if (isNew) {
+    ensureHeaders(sh, TH);
+  } else {
+    var lastCol = sh.getLastColumn();
+    if (lastCol < TH.length) {
+      sh.getRange(1, lastCol + 1, 1, TH.length - lastCol).setValues([TH.slice(lastCol)]);
+      sh.getRange(1, lastCol + 1, 1, TH.length - lastCol)
+        .setFontWeight("bold").setBackground("#4285F4").setFontColor("#fff")
+        .setWrap(true).setHorizontalAlignment("center").setVerticalAlignment("middle");
+    }
+  }
+
+  COL_WIDTHS.forEach(function(v, i) { sh.setColumnWidth(i + 1, v); });
+
   sh.getRange("D2:D51").setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(["0.25","0.5","0.75","1.0"]).setAllowInvalid(false).build());
   sh.getRange("C2:C51").setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(["\u041e\u0441\u043d\u043e\u0432\u043d\u043e\u0435 \u043c\u0435\u0441\u0442\u043e \u0440\u0430\u0431\u043e\u0442\u044b","\u0421\u043e\u0432\u043c\u0435\u0441\u0442\u0438\u0442\u0435\u043b\u044c"]).setAllowInvalid(false).build());
   sh.getRange("J2:J51").setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(["\u041f\u0435\u0440\u0432\u0438\u0447\u043d\u0430\u044f","\u041f\u0435\u0440\u0438\u043e\u0434\u0438\u0447\u0435\u0441\u043a\u0430\u044f"]).setAllowInvalid(false).build());
+
   setTrainFormulas(sh);
   setTrainCondFmt(sh);
-  sh.setFrozenRows(1); sh.setFrozenColumns(2);
+  sh.setFrozenRows(1);
+  sh.setFrozenColumns(2);
+
+  sh.getRange(1, 17).setNote("\u0414\u0430\u0442\u0430 \u043e\u0431\u0443\u0447\u0435\u043d\u0438\u044f \u043f\u043e \u043e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0435 \u043c\u0435\u0434. \u043e\u0442\u0445\u043e\u0434\u043e\u0432 (DD.MM.YYYY)");
+  sh.getRange(1, 18).setNote("\u0414\u0430\u0442\u0430 \u043e\u0431\u0443\u0447\u0435\u043d\u0438\u044f \u043f\u043e \u043e\u0445\u0440\u0430\u043d\u0435 \u0442\u0440\u0443\u0434\u0430 (DD.MM.YYYY)");
+  sh.getRange(1, 19).setNote("\u0414\u0430\u0442\u0430 \u043e\u0431\u0443\u0447\u0435\u043d\u0438\u044f \u043f\u043e \u043f\u043e\u0436\u0430\u0440\u043d. \u0431\u0435\u0437\u043e\u043f\u0430\u0441\u043d\u043e\u0441\u0442\u0438 (DD.MM.YYYY)");
 }
 
+// =====================================================
+// ФОРМУЛЫ ОБУЧЕНИЯ
+//
+// Раскладка колонок (индексы):
+//  A=1  B=2  C=3  D=4  E=5  F=6  G=7  H=8  I=9  J=10
+//  K=11  L=12  M=13  N=14  O=15  P=16  Q=17  R=18  S=19
+//
+//  K = След. аккр. (авто) = дата I + 5 лет
+//  L = Ост. до аккр. (без изменений!)
+//  M = Уведомление
+//  N = План. дата обуч. (ручной ввод)
+//  O = Коридор обучения = "ДД.ММ.ГГГГ - ДД.ММ.ГГГГ" (из I и K)
+//  P = Доп. сведения (ручной ввод)
+//  Q = Обуч. мед. отходы (ручной ввод)
+//  R = Обуч. охрана труда (ручной ввод)
+//  S = Обуч. пожарн. безопасность (ручной ввод)
+// =====================================================
 function setTrainFormulas(sh) {
   for (var r = 2; r <= 51; r++) {
-    putFormula(sh.getRange(r, 11), "=IF(I" + r + "=\"\";\"\";DATE(YEAR(I" + r + ")+5;MONTH(I" + r + ");DAY(I" + r + ")))");
-    putFormula(sh.getRange(r, 12), "=IF(K" + r + "=\"\";\"\";IF(K" + r + "<TODAY();" + q() + "\u041f\u0420\u041e\u0421\u0420\u041e\u0427\u0415\u041d\u043e" + q() + ";CONCATENATE(" + q() + "\u041e\u0441\u0442\u0430\u043b\u043e\u0441\u044c " + q() + ";DATEDIF(TODAY();K" + r + ";" + q() + "Y" + q() + ");" + q() + " \u043b\u0435\u0442 " + q() + ";DATEDIF(TODAY();K" + r + ";" + q() + "YM" + q() + ");" + q() + " \u043c\u0435\u0441 " + q() + ";DATEDIF(TODAY();K" + r + ";" + q() + "MD" + q() + ");" + q() + " \u0434\u043d." + q() + ")))");
-    putFormula(sh.getRange(r,13),"=IF(AND(K"+r+"<>\"\";K"+r+"<=TODAY()+2);CONCATENATE(\"С \";TEXT(K"+r+";\"ДД.ММ.ГГГГ\");\" необходимо отправить в отпуск\");\"\")");
-    putFormula(sh.getRange(r, 15), "=IF(N" + r + "<>" + q() + q() + ";IF(N" + r + "<TODAY();CONCATENATE(" + q() + "\u041f\u0420\u041e\u0421\u0420\u041e\u0427\u0415\u041d\u043e: " + q() + ";TEXT(N" + r + ";" + q() + "DD.MM.YYYY" + q() + "));CONCATENATE(" + q() + "\u041f\u043b\u0430\u043d: " + q() + ";TEXT(N" + r + ";" + q() + "DD.MM.YYYY" + q() + ");" + q() + " (\u043e\u0441\u0442\u0430\u043b\u043e\u0441\u044c " + q() + ";DATEDIF(TODAY();N" + r + ";" + q() + "Y" + q() + ");" + q() + " \u043b\u0435\u0442 " + q() + ";DATEDIF(TODAY();N" + r + ";" + q() + "YM" + q() + ");" + q() + " \u043c\u0435\u0441)" + q() + "));IF(F" + r + "=" + q() + q() + ";" + q() + q() + ";CONCATENATE(" + q() + "\u041d\u0435 \u0437\u0430\u043f\u043b\u0430\u043d\u0438\u0440\u043e\u0432\u0430\u043d\u043e. \u041f\u0440\u043e\u0448\u043b\u043e " + q() + ";DATEDIF(F" + r + ";TODAY();" + q() + "Y" + q() + ");" + q() + " \u043b\u0435\u0442 " + q() + ";DATEDIF(F" + r + ";TODAY();" + q() + "YM" + q() + ");" + q() + " \u043c\u0435\u0441 \u0438\u0437 5." + q() + ")))");
-    sh.getRange(r, 6).setNumberFormat("DD.MM.YYYY");
-    sh.getRange(r, 9).setNumberFormat("DD.MM.YYYY");
+
+    // K (11): Следующая аккредитация = дата аккредитации + 5 лет
+    putFormula(sh.getRange(r, 11),
+      "=IF(I" + r + "=\"\";\"\";DATE(YEAR(I" + r + ")+5;MONTH(I" + r + ");DAY(I" + r + ")))");
+
+    // L (12): Ост. до аккр. — БЕЗ ИЗМЕНЕНИЙ (как в оригинале)
+    putFormula(sh.getRange(r, 12),
+      "=IF(K" + r + "=\"\";\"\";IF(K" + r + "<TODAY();" +
+      q() + "\u041f\u0420\u041e\u0421\u0420\u041e\u0427\u0415\u041d\u043e" + q() +
+      ";CONCATENATE(" + q() + "\u041e\u0441\u0442\u0430\u043b\u043e\u0441\u044c " + q() +
+      ";DATEDIF(TODAY();K" + r + ";" + q() + "Y" + q() +
+      ");" + q() + " \u043b\u0435\u0442 " + q() +
+      ";DATEDIF(TODAY();K" + r + ";" + q() + "YM" + q() +
+      ");" + q() + " \u043c\u0435\u0441 " + q() +
+      ";DATEDIF(TODAY();K" + r + ";" + q() + "MD" + q() +
+      ");" + q() + " \u0434\u043d." + q() + ")))");
+
+    // M (13): Уведомление — БЕЗ ИЗМЕНЕНИЙ
+    putFormula(sh.getRange(r, 13),
+      "=IF(AND(K" + r + "<>\"\";K" + r + "<=TODAY()+2);" +
+      "CONCATENATE(\"\u0421 \";TEXT(K" + r + ";\"DD.MM.YYYY\");\" \u043d\u0435\u043e\u0431\u0445\u043e\u0434\u0438\u043c\u043e \u043e\u0442\u043f\u0440\u0430\u0432\u0438\u0442\u044c \u0432 \u043e\u0442\u043f\u0443\u0441\u043a\");\"\")");
+
+    // N (14): План. дата обуч. — ручной ввод, формат даты
     sh.getRange(r, 14).setNumberFormat("DD.MM.YYYY");
+
+    // O (15): КОРИДОР ОБУЧЕНИЯ — "ДД.ММ.ГГГГ - ДД.ММ.ГГГГ"
+    // Берём дату аккредитации (I) и следующую аккредитацию (K)
+    putFormula(sh.getRange(r, 15),
+      "=IF(OR(I" + r + "=\"\";K" + r + "=\"\");\"\";" +
+      "TEXT(I" + r + ";\"DD.MM.YYYY\")&\" - \"&TEXT(K" + r + ";\"DD.MM.YYYY\"))");
+
+    // Форматы дат
+    sh.getRange(r, 6).setNumberFormat("DD.MM.YYYY");   // F: Дата обуч.
+    sh.getRange(r, 9).setNumberFormat("DD.MM.YYYY");   // I: Дата аккр.
+    sh.getRange(r, 11).setNumberFormat("DD.MM.YYYY");  // K: След. аккр.
+
+    // Q, R, S — формат дат для ручного ввода
+    sh.getRange(r, 17).setNumberFormat("DD.MM.YYYY");  // Q: Обуч. мед. отходы
+    sh.getRange(r, 18).setNumberFormat("DD.MM.YYYY");  // R: Обуч. охрана труда
+    sh.getRange(r, 19).setNumberFormat("DD.MM.YYYY");  // S: Обуч. пожарн. безопасность
   }
 }
 
+// =====================================================
+// УСЛОВНОЕ ФОРМАТИРОВАНИЕ ОБУЧЕНИЯ
+// =====================================================
 function setTrainCondFmt(sh) {
   try {
     var rules = [];
-    rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied("=AND($K2<>\"\";$K2<TODAY())").setFontColor("#CC0000").setBold(true).setRanges([sh.getRange("K2:K51")]).build());
-    rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied("=AND($K2<>\"\";$K2>=TODAY();$K2<=TODAY()+122)").setBackground("#F4CCCC").setFontColor("#CC0000").setRanges([sh.getRange("K2:K51")]).build());
-    rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied("=AND($K2<>\"\";$K2>TODAY()+122;$K2<=TODAY()+365)").setBackground("#FFF2CC").setRanges([sh.getRange("K2:K51")]).build());
-    rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied("=LEN($M2)>0").setBackground("#FFF2CC").setFontColor("#CC0000").setRanges([sh.getRange("M2:M51")]).build());
+
+    // === Колонка K (11) — След. аккр. (3 уровня) ===
+    // K1: Просрочено — красный жирный
+    rules.push(SpreadsheetApp.newConditionalFormatRule()
+      .whenFormulaSatisfied("=AND($K2<>\"\";$K2<TODAY())")
+      .setFontColor("#CC0000").setBold(true)
+      .setRanges([sh.getRange("K2:K51")]).build());
+
+    // K2: До окончания < 122 дней (~4 мес) — красный фон
+    rules.push(SpreadsheetApp.newConditionalFormatRule()
+      .whenFormulaSatisfied("=AND($K2<>\"\";$K2>=TODAY();$K2<=TODAY()+122)")
+      .setBackground("#F4CCCC").setFontColor("#CC0000")
+      .setRanges([sh.getRange("K2:K51")]).build());
+
+    // K3: До окончания < 365 дней (~1 год) — жёлтый фон
+    rules.push(SpreadsheetApp.newConditionalFormatRule()
+      .whenFormulaSatisfied("=AND($K2<>\"\";$K2>TODAY()+122;$K2<=TODAY()+365)")
+      .setBackground("#FFF2CC")
+      .setRanges([sh.getRange("K2:K51")]).build());
+
+    // === Колонка O (15) — КОРИДОР ОБУЧЕНИЯ (2 уровня) ===
+    // Формулы проверяют колонку K (дата окончания коридора),
+    // но условное форматирование применяется к диапазону O2:O51
+    //
+    // O1: До окончания коридора < 6 месяцев → красный фон + красный текст
+    rules.push(SpreadsheetApp.newConditionalFormatRule()
+      .whenFormulaSatisfied("=AND($K2<>\"\";$K2<=EDATE(TODAY();6))")
+      .setBackground("#F4CCCC").setFontColor("#CC0000")
+      .setRanges([sh.getRange("O2:O51")]).build());
+
+    // O2: До окончания коридора < 1 года → жёлтый фон
+    rules.push(SpreadsheetApp.newConditionalFormatRule()
+      .whenFormulaSatisfied("=AND($K2<>\"\";$K2>EDATE(TODAY();6);$K2<=EDATE(TODAY();12))")
+      .setBackground("#FFF2CC")
+      .setRanges([sh.getRange("O2:O51")]).build());
+
+    // === Колонка M (13) — Уведомление ===
+    // M1: Если уведомление заполнено → жёлтый фон + красный текст
+    rules.push(SpreadsheetApp.newConditionalFormatRule()
+      .whenFormulaSatisfied("=LEN($M2)>0")
+      .setBackground("#FFF2CC").setFontColor("#CC0000")
+      .setRanges([sh.getRange("M2:M51")]).build());
+
     sh.setConditionalFormatRules(rules);
   } catch(e) {}
 }
 
 // =====================================================
-// ПРОФОСМОТР
+// ПРОФОСМОТР (без изменений)
 // =====================================================
 function createExam(ss, loc) {
   var sh = ensureSheet(ss, loc + " \u043f\u0440\u043e\u0444 \u043e\u0441\u043c\u043e\u0442\u0440");
@@ -295,21 +420,16 @@ function createExam(ss, loc) {
 
   sh.getRange("F2:F51").setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(["\u041c", "\u0416"]).setAllowInvalid(false).build());
   sh.getRange("H2:H51").setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(["\u041e\u0441\u043d\u043e\u0432\u043d\u043e\u0435 \u043c\u0435\u0441\u0442\u043e \u0440\u0430\u0431\u043e\u0442\u044b", "\u0421\u043e\u0432\u043c\u0435\u0441\u0442\u0438\u0442\u0435\u043b\u044c"]).setAllowInvalid(false).build());
-
   sh.getRange(1, vS + 2).setNote("\u041a\u0440\u0430\u0441\u043d\u0443\u0445\u0430: \u0442\u043e\u043b\u044c\u043a\u043e \u0434\u043b\u044f \u0436\u0435\u043d\u0449. \u0434\u043e 35 \u043b\u0435\u0442.");
   sh.getRange(1, kS).setNote("1-\u0439 \u0441\u043f\u0438\u0441\u043e\u043a: \u0412\u044b\u043f. \u0440\u0430\u0431\u043e\u0442\u044b. 2-\u0439: \u0425\u0438\u043c. \u0444\u0430\u043a\u0442\u043e\u0440\u044b. 3-\u0439: \u0411\u0438\u043e\u043b. \u0444\u0430\u043a\u0442\u043e\u0440\u044b. 4-\u0439: \u0424\u0438\u0437.+\u0422\u0440\u0443\u0434.");
-
   setExamFormulas(sh);
   setExamCondFmt(sh);
   sh.setFrozenRows(1); sh.setFrozenColumns(2);
 }
 
-// =====================================================
-// ФОРМУЛЫ ПРОФОСМОТРА — dS = pL+vL+1 = 18
-// =====================================================
 function setExamFormulas(sh) {
   var pL = EH.length, vL = EV.length;
-  var dS = pL + vL + 1; // = 18
+  var dS = pL + vL + 1;
   for (var r = 2; r <= 51; r++) {
     putFormula(sh.getRange(r, 3), "=IF(B" + r + "=\"\";\"\";DATEDIF(B" + r + ";TODAY();" + q() + "Y" + q() + "))");
     putFormula(sh.getRange(r, dS + 1), "=IF(R" + r + "=\"\";\"\";DATE(YEAR(R" + r + ")+1;MONTH(R" + r + ");DAY(R" + r + ")))");
@@ -332,23 +452,18 @@ function setExamCondFmt(sh) {
 }
 
 // =====================================================
-// ОБНОВЛЕНИЕ ВЫПАДАЮЩИХ СПИСКОВ (из справочника)
+// ОБНОВЛЕНИЕ ВЫПАДАЮЩИХ СПИСКОВ
 // =====================================================
 function updateExamDropdowns(sh, lists, sections) {
   var pL = EH.length, vL = EV.length, dL = ED.length;
-  var kS = pL + vL + dL + 1; // = 21
-
-  // Собираем все значения из всех разделов для combined списка
+  var kS = pL + vL + dL + 1;
   var allItems = [];
   sections.forEach(function(sec) {
     if (lists[sec]) {
       lists[sec].forEach(function(item) { allItems.push(item); });
     }
   });
-
-  // Устанавливаем выпадающие списки для каждой колонки
   for (var p = 0; p < 4; p++) {
-    // Используем общий список для всех колонок, но с приоритетом раздела
     sh.getRange(2, kS + p, 50, 1).setDataValidation(
       SpreadsheetApp.newDataValidation().requireValueInList(allItems).setAllowInvalid(true).build()
     );
@@ -385,7 +500,7 @@ function onEditHook(e) {
 }
 
 // =====================================================
-// ОБНОВЛЕНИЕ СПЕЦИАЛИСТОВ И ИССЛЕДОВАНИЙ (из справочника)
+// ОБНОВЛЕНИЕ СПЕЦИАЛИСТОВ И ИССЛЕДОВАНИЙ
 // =====================================================
 function doRefresh(sh, row, pktS, resS) {
   try {
@@ -393,24 +508,17 @@ function doRefresh(sh, row, pktS, resS) {
     var gender = sh.getRange(row, 6).getValue();
     var hasAge = (age !== "" && age !== null && !isNaN(age));
     var specs = [], tests = [];
-
-    // Читаем пункты из 4 колонок
     for (var p = 0; p < 4; p++) {
       var val = sh.getRange(row, pktS + p).getValue();
       if (!val || val === "") continue;
-
-      // Ищем в _pktCache (загружен из справочника)
       var pk = _pktCache.find(function(x) { return (x.code + " " + x.name) === val; });
       if (!pk) continue;
-
       if (pk.spec) pk.spec.split(", ").forEach(function(s) { if (specs.indexOf(s) === -1) specs.push(s); });
       if (pk.tests) pk.tests.split("; ").forEach(function(t) {
         var tr = t.replace(/^\s+|\s+$/g, "");
         if (tr && tests.indexOf(tr) === -1) tests.push(tr);
       });
     }
-
-    // Базовые исследования (неизменяемые)
     BASE.forEach(function(item) {
       if (hasAge) {
         if (item[4] > 0 && age < item[4]) return;
@@ -423,7 +531,6 @@ function doRefresh(sh, row, pktS, resS) {
         if (tr && tests.indexOf(tr) === -1) tests.push(tr);
       });
     });
-
     sh.getRange(row, resS).setValue(specs.join("\n"));
     sh.getRange(row, resS + 1).setValue(tests.join("\n"));
   } catch(e) { Logger.log("doRefresh: " + e); }
@@ -439,4 +546,98 @@ function toggleRef() {
     var sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(NM_REF);
     if (sh) sh.isSheetHidden() ? sh.showSheet() : sh.hideSheet();
   } catch(e) {}
+}
+// =====================================================
+// ДОСТРОЙКА НОВЫХ СТОЛБЦОВ O-S К СУЩЕСТВУЮЩИМ ЛИСТАМ
+// Не трогает данные в колонках A-N. Только добавляет/обновляет O-S.
+// =====================================================
+function addNewColumns() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss) return;
+  var sheets = ss.getSheets();
+  var count = 0;
+  sheets.forEach(function(sh) {
+    var nm = sh.getName();
+    if (nm.indexOf("\u043e\u0431\u0443\u0447\u0435\u043d\u0438\u0435") === -1) return;
+    // --- Шаг 1: Переименовать заголовок O (15) ---
+    // Было: "Ост. до обуч." → Стало: "Коридор обучения"
+    var oldO = sh.getRange(1, 15).getValue();
+    if (oldO !== "\u041a\u043e\u0440\u0438\u0434\u043e\u0440 \u043e\u0431\u0443\u0447\u0435\u043d\u0438\u044f") {
+      sh.getRange(1, 15).setValue("\u041a\u043e\u0440\u0438\u0434\u043e\u0440 \u043e\u0431\u0443\u0447\u0435\u043d\u0438\u044f");
+    }
+    // --- Шаг 2: Формула коридора в O (15) для всех строк ---
+    for (var r = 2; r <= 51; r++) {
+      var cellVal = sh.getRange(r, 1).getValue();
+      if (cellVal === "" || cellVal === null) continue;
+      putFormula(sh.getRange(r, 15),
+        "=IF(OR(I" + r + "=\"\";K" + r + "=\"\");\"\";" +
+        "TEXT(I" + r + ";\"DD.MM.YYYY\")&\" - \"&TEXT(K" + r + ";\"DD.MM.YYYY\"))");
+    }
+    // --- Шаг 3: Добавить заголовки P-S (16-19) если их нет ---
+    var lastCol = sh.getLastColumn();
+    var newHeaders = [
+      "\u0414\u043e\u043f. \u0441\u0432\u0435\u0434.",                           // P: Доп. сведения
+      "\u041e\u0431\u0443\u0447. \u043c\u0435\u0434. \u043e\u0442\u0445\u043e\u0434\u044b", // Q: Обуч. мед. отходы
+      "\u041e\u0431\u0443\u0447. \u043e\u0445\u0440\u0430\u043d\u0430 \u0442\u0440\u0443\u0434\u0430", // R: Обуч. охрана труда
+      "\u041e\u0431\u0443\u0447. \u043f\u043e\u0436\u0430\u0440\u043d. \u0431\u0435\u0437\u043e\u043f\u0430\u0441\u043d."  // S: Обуч. пожарн. безопасность
+    ];
+    // Если колонок меньше 19 — дописываем заголовки
+    if (lastCol < 19) {
+      var startCol = lastCol + 1;
+      var howMany = 19 - lastCol;
+      // Берём только те, которых ещё нет
+      var headersToAdd = newHeaders.slice(startCol - 16); // 16 = P
+      if (headersToAdd.length > 0) {
+        sh.getRange(1, startCol, 1, headersToAdd.length).setValues([headersToAdd]);
+        sh.getRange(1, startCol, 1, headersToAdd.length)
+          .setFontWeight("bold")
+          .setBackground("#4285F4")
+          .setFontColor("#fff")
+          .setWrap(true)
+          .setHorizontalAlignment("center")
+          .setVerticalAlignment("middle");
+      }
+    }
+    // --- Шаг 4: Ширины колонок O-S ---
+    sh.setColumnWidth(15, 200);  // O: Коридор обучения
+    sh.setColumnWidth(16, 200);  // P: Доп. сведения
+    sh.setColumnWidth(17, 130);  // Q: Обуч. мед. отходы
+    sh.setColumnWidth(18, 130);  // R: Обуч. охрана труда
+    sh.setColumnWidth(19, 130);  // S: Обуч. пожарн. безопасность
+    // --- Шаг 5: Формат дат для Q, R, S ---
+    for (var r = 2; r <= 51; r++) {
+      sh.getRange(r, 17).setNumberFormat("DD.MM.YYYY"); // Q
+      sh.getRange(r, 18).setNumberFormat("DD.MM.YYYY"); // R
+      sh.getRange(r, 19).setNumberFormat("DD.MM.YYYY"); // S
+    }
+    // --- Шаг 6: Условное форматирование для O (коридор) ---
+    // Удаляем старые правила для O, если есть, и ставим новые
+    var rules = sh.getConditionalFormatRules();
+    var newRules = [];
+    for (var i = 0; i < rules.length; i++) {
+      var rng = rules[i].getRanges();
+      var isOldO = false;
+      for (var j = 0; j < rng.length; j++) {
+        var rA1 = rng[j].getA1Notation();
+        if (rA1.indexOf("O2:O") === 0 || rA1 === "O2:O51") {
+          isOldO = true;
+          break;
+        }
+      }
+      if (!isOldO) newRules.push(rules[i]);
+    }
+    // Красный: до окончания коридора < 6 мес
+    newRules.push(SpreadsheetApp.newConditionalFormatRule()
+      .whenFormulaSatisfied("=AND($K2<>\"\";$K2<=EDATE(TODAY();6))")
+      .setBackground("#F4CCCC").setFontColor("#CC0000")
+      .setRanges([sh.getRange("O2:O51")]).build());
+    // Жёлтый: до окончания коридора < 1 года
+    newRules.push(SpreadsheetApp.newConditionalFormatRule()
+      .whenFormulaSatisfied("=AND($K2<>\"\";$K2>EDATE(TODAY();6);$K2<=EDATE(TODAY();12))")
+      .setBackground("#FFF2CC")
+      .setRanges([sh.getRange("O2:O51")]).build());
+    sh.setConditionalFormatRules(newRules);
+    count++;
+  });
+  SpreadsheetApp.getUi().alert("\u2705 \u0413\u043e\u0442\u043e\u0432\u043e! \u0414\u043e\u0441\u0442\u0440\u043e\u0435\u043d\u043e " + count + " \u043b\u0438\u0441\u0442(\u043e\u0432).");
 }
