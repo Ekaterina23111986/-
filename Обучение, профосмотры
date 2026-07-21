@@ -1,0 +1,442 @@
+/**
+ * МЕДИЦИНСКАЯ ТАБЛИЦА v13
+ * Справочник 29н = ИСТОЧНИК ДАННЫХ. Скрипт ЧИТАЕТ его при пересчёте.
+ * Можно дополнять/удалять строки в справочнике.
+ *
+ * ЗАПУСК: МедТаблица > Создать структуру (или Пересчитать формулы)
+ */
+
+function ensureSheet(ss,n){var sh=ss.getSheetByName(n);if(!sh)sh=ss.insertSheet(n);return sh;}
+function ensureHeaders(sh,h,bg){if(sh.getRange(1,1).getValue()!=="")return;sh.getRange(1,1,1,h.length).setValues([h]);sh.getRange(1,1,1,h.length).setFontWeight("bold").setBackground(bg||"#4285F4").setFontColor("#fff").setWrap(true).setHorizontalAlignment("center").setVerticalAlignment("middle");sh.setRowHeight(1,55);}
+function putFormula(c,f){c.clearFormat();c.setFormula(f);}
+
+// =====================================================
+// БАЗОВЫЕ ИССЛЕДОВАНИЯ (п.12.2-12.4) — неизменяемые
+// [name, specialist, tests, minAge, maxAge, gender]
+// =====================================================
+var BASE=[
+["\u0410\u043d\u0442\u0440\u043e\u043f\u043e\u043c\u0435\u0442\u0440\u0438\u044f (\u0418\u041c\u0422)","","\u0420\u0430\u0441\u0447\u0451\u0442 \u0418\u041c\u0422 (\u0440\u043e\u0441\u0442, \u043c\u0430\u0441\u0441\u0430, \u0442\u0430\u043b\u0438\u044f)",18,0,"\u0412\u0441\u0435"],
+["\u041e\u0431\u0449. \u0430\u043d\u0430\u043b. \u043a\u0440\u043e\u0432\u0438","","\u0413\u0435\u043c\u043e\u0433\u043b., \u044d\u0440\u0438\u0442\u0440., \u0442\u0440\u043e\u043c\u0431., \u043b\u0435\u0439\u043a., \u043b\u0435\u0439\u043a.\u0444\u043e\u0440., \u0421\u041e\u042d",0,0,"\u0412\u0441\u0435"],
+["\u0410\u043d\u0430\u043b\u0438\u0437 \u043c\u043e\u0447\u0438","","\u0423\u0434. \u0432\u0435\u0441, \u0431\u0435\u043b\u043e\u043a, \u0441\u0430\u0445\u0430\u0440, \u043c\u0438\u043a\u0440.",0,0,"\u0412\u0441\u0435"],
+["\u042d\u041a\u0413","","\u042d\u043b\u0435\u043a\u0442\u0440\u043e\u043a\u0430\u0440\u0434\u0438\u043e\u0433\u0440\u0430\u0444\u0438\u044f",18,0,"\u0412\u0441\u0435"],
+["\u0418\u0437\u043c. \u0410\u0414","","\u0418\u0437\u043c\u0435\u0440\u0435\u043d\u0438\u0435 \u0410\u0414",18,0,"\u0412\u0441\u0435"],
+["\u0425\u043e\u043b\u0435\u0441\u0442\u0435\u0440\u0438\u043d","","\u0423\u0440\u043e\u0432\u0435\u043d\u044c \u0445\u043e\u043b\u0435\u0441\u0442\u0435\u0440\u0438\u043d\u0430",18,0,"\u0412\u0441\u0435"],
+["\u0413\u043b\u044e\u043a\u043e\u0437\u0430","","\u0413\u043b\u044e\u043a\u043e\u0437\u0430 \u043a\u0440\u043e\u0432\u0438",18,0,"\u0412\u0441\u0435"],
+["\u0421\u0421-\u0440\u0438\u0441\u043a SCORE","","\u041e\u0442\u043d. \u0421\u0421-\u0440\u0438\u0441\u043a \u043f\u043e SCORE",18,40,"\u0412\u0441\u0435"],
+["\u0410\u0431\u0441. \u0421\u0421-\u0440\u0438\u0441\u043a","","\u0410\u0431\u0441\u043e\u043b. \u0421\u0421-\u0440\u0438\u0441\u043a",41,0,"\u0412\u0441\u0435"],
+["\u0424\u041b\u0413","","\u0424\u041b\u0413 \u043b\u0435\u0433\u043a\u0438\u0445 \u0432 2 \u043f\u0440\u043e\u0435\u043a\u0446.",18,0,"\u0412\u0441\u0435"],
+["\u0412\u0413\u0414","","\u0412\u043d\u0443\u0442\u0440\u0438\u0433\u043b\u0430\u0437\u043d\u043e\u0435 \u0434\u0430\u0432\u043b\u0435\u043d\u0438\u0435",40,0,"\u0412\u0441\u0435"],
+["\u0422\u0435\u0440\u0430\u043f\u0435\u0432\u0442","\u0412\u0440\u0430\u0447-\u0442\u0435\u0440\u0430\u043f\u0435\u0432\u0442","",0,0,"\u0412\u0441\u0435"],
+["\u041d\u0435\u0432\u0440\u043e\u043b\u043e\u0433","\u0412\u0440\u0430\u0447-\u043d\u0435\u0432\u0440\u043e\u043b\u043e\u0433","",0,0,"\u0412\u0441\u0435"],
+["\u041f\u0441\u0438\u0445\u0438\u0430\u0442\u0440","\u0412\u0440\u0430\u0447-\u043f\u0441\u0438\u0445\u0438\u0430\u0442\u0440","",0,0,"\u0412\u0441\u0435"],
+["\u041d\u0430\u0440\u043a\u043e\u043b\u043e\u0433","\u0412\u0440\u0430\u0447-\u043d\u0430\u0440\u043a\u043e\u043b\u043e\u0433","",0,0,"\u0412\u0441\u0435"],
+["\u0413\u0438\u043d\u0435\u043a\u043e\u043b\u043e\u0433","\u0412\u0440\u0430\u0447-\u0430\u043a\u0443\u0448\u0435\u0440-\u0433\u0438\u043d\u0435\u043a\u043e\u043b\u043e\u0433","\u0411\u0430\u043a\u0442. \u0438\u0441\u0441\u043b. (\u043d\u0430 \u0444\u043b\u043e\u0440\u0443), \u0426\u0438\u0442\u043e\u043b. \u0438\u0441\u0441\u043b. (\u043d\u0430 \u0430\u0442\u0438\u043f.), \u0423\u0417\u0418 \u043c\u0430\u043b\u043e\u0433\u043e \u0442\u0430\u0437\u0430",0,0,"\u0416"],
+["\u041c\u0430\u043c\u043c\u043e\u0433\u0440\u0430\u0444\u0438\u044f","","\u041c\u0430\u043c\u043c\u043e\u0433\u0440\u0430\u0444\u0438\u044f \u043c\u043e\u043b\u043e\u0447\u043d. \u0436\u0435\u043b\u0435\u0437 \u0432 2 \u043f\u0440\u043e\u0435\u043a\u0446.",41,0,"\u0416"],
+["\u0413\u0435\u043f\u0430\u0442\u0438\u0442 \u0412\u0421","","\u0413\u0435\u043f\u0430\u0442\u0438\u0442 \u0412 \u0438 \u0421 (\u043f.767 \u0421\u0430\u043d\u041f\u0418\u041d)",0,0,"\u0412\u0441\u0435"]
+];
+
+var TH=["\u0424\u0418\u041e","\u0414\u043e\u043b\u0436\u043d\u043e\u0441\u0442\u044c","\u041e\u0441\u043d./\u0421\u043e\u0432\u043c.","\u0421\u0442\u0430\u0432\u043a\u0430","\u0421\u043f\u0435\u0446.","\u0414\u0430\u0442\u0430 \u043e\u0431\u0443\u0447.","\u2116 \u0434\u0438\u043f\u043b.","\u041d\u0430\u0438\u043c. \u043e\u0431\u0443\u0447.","\u0414\u0430\u0442\u0430 \u0430\u043a\u043a\u0440.","\u0422\u0438\u043f \u0430\u043a\u043a\u0440.","\u0421\u043b\u0435\u0434. \u0430\u043a\u043a\u0440.(\u0430\u0432\u0442\u043e)","\u0423\u0432\u0435\u0434\u043e\u043c\u043b.","\u041f\u043b\u0430\u043d. \u0434\u0430\u0442\u0430 \u043e\u0431\u0443\u0447.","\u041e\u0441\u0442. \u0434\u043e \u043e\u0431\u0443\u0447."];
+var EH=["\u0424\u0418\u041e","\u0414\u0430\u0442\u0430 \u0440\u043e\u0436\u0434.","\u0412\u043e\u0437\u0440\u0430\u0441\u0442","\u0421\u041d\u0418\u041b\u0421","\u0410\u0434\u0440\u0435\u0441","\u041f\u043e\u043b","\u0414\u043e\u043b\u0436\u043d\u043e\u0441\u0442\u044c","\u041e\u0441\u043d./\u0421\u043e\u0432\u043c."];
+var EV=["\u041a\u043e\u0440\u044c(1)","\u041a\u043e\u0440\u044c(2)","\u041a\u0440\u0430\u0441\u043d\u0443\u0445\u0430","\u0413\u0435\u043f.\u0412(V1)","\u0413\u0435\u043f.\u0412(V2)","\u0413\u0435\u043f.\u0412(V3)","\u0410\u041a\u0414\u0421(1)","\u0410\u041a\u0414\u0421(2)","\u0413\u0440\u0438\u043f\u043f"];
+var ED=["\u0414\u0430\u0442\u0430 \u043f\u043e\u0441\u043b.\u043f\u0440\u043e\u0444\u043e\u0441\u043c.","\u041f\u043b\u0430\u043d.\u0434\u0430\u0442\u0430(\u0430\u0432\u0442\u043e)","\u041e\u0441\u0442.\u0434\u043e \u043f\u0440\u043e\u0444\u043e\u0441\u043c."];
+var EP=["\u041f\u0443\u043d\u043a\u0442: \u0412\u044b\u043f. \u0440\u0430\u0431\u043e\u0442\u044b","\u041f\u0443\u043d\u043a\u0442: \u0425\u0438\u043c. \u0444\u0430\u043a\u0442\u043e\u0440\u044b","\u041f\u0443\u043d\u043a\u0442: \u0411\u0438\u043e\u043b. \u0444\u0430\u043a\u0442\u043e\u0440\u044b","\u041f\u0443\u043d\u043a\u0442: \u0424\u0438\u0437.+\u0422\u0440\u0443\u0434."];
+var ER=["\u0421\u043f\u0435\u0446.(\u0430\u0432\u0442\u043e)","\u0418\u0441\u0441\u043b.(\u0430\u0432\u0442\u043e)"];
+var NM_REF="\u0421\u043f\u0440\u0430\u0432\u043e\u0447\u043d\u0438\u043a 29\u043d";
+var NM_LOCS=["\u0413\u0430\u043c\u0430\u043b\u0435\u0438","\u041a\u0438\u0435\u0432\u0441\u043a\u0430\u044f","\u0421\u041f\u0411"];
+
+// Глобальный кэш данных из справочника (обновляется при каждом пересчёте)
+var _pktCache = [];
+
+function putFormula(c,f){c.clearFormat();c.setFormula(f);}
+
+// =====================================================
+// МЕНЮ
+// =====================================================
+function onOpen(){
+  SpreadsheetApp.getUi().createMenu("\uD83C\uDFE5 \u041c\u0435\u0434\u0422\u0430\u0431\u043b\u0438\u0446\u0430")
+    .addItem("\u2705 \u0421\u043e\u0437\u0434\u0430\u0442\u044c \u0441\u0442\u0440\u0443\u043a\u0442\u0443\u0440\u0443","runCreate")
+    .addItem("\uD83D\uDD04 \u041f\u0435\u0440\u0435\u0441\u0447\u0438\u0442\u0430\u0442\u044c \u0444\u043e\u0440\u043c\u0443\u043b\u044b","runFormulasOnly")
+    .addItem("\uD83D\uDC41 \u0421\u043f\u0440\u0430\u0432\u043e\u0447\u043d\u0438\u043a: \u043f\u043e\u043a\u0430\u0437\u0430\u0442\u044c/\u0441\u043a\u0440\u044b\u0442\u044c","toggleRef")
+    .addToUi();
+}
+
+// =====================================================
+// ЧТЕНИЕ ДАННЫХ ИЗ СПРАВОЧНИКА (источник правды)
+// =====================================================
+function loadRefData(ss) {
+  _pktCache = [];
+  var sh = ss.getSheetByName(NM_REF);
+  if (!sh) return;
+  var last = sh.getLastRow();
+  if (last < 2) return;
+  var data = sh.getRange(1, 1, last, 5).getValues();
+  // data[0] = заголовки
+  // data[1..] = строки: [Код, Раздел, Наименование, Специалисты, Исследования]
+  for (var i = 1; i < data.length; i++) {
+    var code = data[i][0];
+    var section = data[i][1];
+    var name = data[i][2];
+    var spec = data[i][3];
+    var tests = data[i][4];
+    // Пропускаем пустые строки и заголовки разделов (начинаются с "▶")
+    if (!code || code === "" || (typeof code === "string" && code.indexOf("\u25B6") === 0)) continue;
+    if (!section || section === "") continue;
+    _pktCache.push({
+      code: String(code).trim(),
+      section: String(section).trim(),
+      name: String(name || "").trim(),
+      spec: String(spec || "").trim(),
+      tests: String(tests || "").trim()
+    });
+  }
+}
+
+// Строим выпадающие списки по разделам
+function buildListsBySection() {
+  var result = {};
+  _pktCache.forEach(function(item) {
+    var sec = item.section;
+    if (!result[sec]) result[sec] = [];
+    result[sec].push(item.code + " " + item.name);
+  });
+  return result;
+}
+
+// =====================================================
+// СПРАВОЧНИК 29н (создаётся один раз)
+// =====================================================
+function createRef(ss){
+  var sh = ensureSheet(ss, NM_REF);
+  sh.setTabColor("#34A853");
+  if (sh.getRange(1,1).getValue() !== "") return;
+
+  sh.getRange("A1:E1").setValues([["\u041a\u043e\u0434","\u0420\u0430\u0437\u0434\u0435\u043b","\u041d\u0430\u0438\u043c\u0435\u043d\u043e\u0432\u0430\u043d\u0438\u0435","\u0412\u0440\u0430\u0447\u0438-\u0441\u043f\u0435\u0446\u0438\u0430\u043b\u0438\u0441\u0442\u044b","\u041b\u0430\u0431. \u0438 \u0444\u0443\u043d\u043a\u0446. \u0438\u0441\u0441\u043b\u0435\u0434\u043e\u0432\u0430\u043d\u0438\u044f"]]);
+  sh.getRange("A1:E1").setFontWeight("bold").setBackground("#1A73E8").setFontColor("#fff").setWrap(true).setHorizontalAlignment("center");
+  sh.setRowHeight(1, 40);
+
+  // Секции для наглядности
+  var sections = [
+    {sec:"VI.\u0412\u044b\u043f. \u0440\u0430\u0431\u043e\u0442\u044b", items:[
+      ["\u043f.6","\u0420\u0430\u0431\u043e\u0442\u044b \u043d\u0430 \u0432\u044b\u0441\u043e\u0442\u0435","\u0412\u0440\u0430\u0447-\u043e\u0442\u043e\u0440., \u0412\u0440\u0430\u0447-\u043e\u0444\u0442., \u0412\u0440\u0430\u0447-\u0445\u0438\u0440.","\u0412\u0435\u0441\u0442\u0438\u0431., \u0410\u0443\u0434., \u041f\u0435\u0440\u0438\u043c., \u0411\u0438\u043e\u043c., \u0412\u0438\u0437\u043e\u043c."],
+      ["\u043f.9","\u042d\u043b\u0435\u043a\u0442\u0440\u043e\u0443\u0441\u0442\u0430\u043d\u043e\u0432\u043a\u0438 50\u0412+","\u0412\u0440\u0430\u0447-\u043e\u0442\u043e\u0440., \u0412\u0440\u0430\u0447-\u043e\u0444\u0442.","\u0412\u0435\u0441\u0442\u0438\u0431., \u0410\u0443\u0434., \u041f\u0435\u0440\u0438\u043c., \u0411\u0438\u043e\u043c., \u0412\u0438\u0437\u043e\u043c."],
+      ["\u043f.18.1","\u0422\u0440\u0430\u043d\u0441\u043f\u043e\u0440\u0442 (A,B,BE)","\u0412\u0440\u0430\u0447-\u043e\u0444\u0442., \u0412\u0440\u0430\u0447-\u043e\u0442\u043e\u0440.","\u041f\u0435\u0440\u0438\u043c., \u0412\u0438\u0437\u043e\u043c., \u0422\u043e\u043d\u043e\u043c., \u0411\u0438\u043e\u043c., \u0426\u0432\u0435\u0442\u043e\u043e\u0449., \u0412\u0435\u0441\u0442\u0438\u0431., \u0410\u0443\u0434."],
+      ["\u043f.18.2","\u0422\u0440\u0430\u043d\u0441\u043f\u043e\u0440\u0442 (C,D,\u0442\u0440\u0430\u043c\u0432.)","\u0412\u0440\u0430\u0447-\u043e\u0444\u0442., \u0412\u0440\u0430\u0447-\u043e\u0442\u043e\u0440.","\u041f\u0435\u0440\u0438\u043c., \u0412\u0438\u0437\u043e\u043c., \u0422\u043e\u043d\u043e\u043c., \u0411\u0438\u043e\u043c., \u0426\u0432\u0435\u0442\u043e\u043e\u0449., \u0412\u0435\u0441\u0442\u0438\u0431., \u0410\u0443\u0434., \u042d\u043b\u0435\u043a\u0442\u0440\u043e\u044d\u043d\u0446."],
+      ["\u043f.23","\u041a\u043e\u043d\u0442\u0430\u043a\u0442 \u0441 \u043f\u0438\u0449\u0435\u043f\u0440\u043e\u0434\u0443\u043a\u0442\u0430\u043c\u0438","\u0412\u0440\u0430\u0447-\u043e\u0442\u043e\u0440., \u0412\u0440\u0430\u0447-\u0434\u0435\u0440\u043c., \u0412\u0440\u0430\u0447-\u0441\u0442\u043e\u043c.","\u0421\u0438\u0444\u0438\u043b\u0438\u0441; \u0413\u043e\u043d\u043e\u0440\u0435\u044f; \u041a\u0438\u0448\u0435\u0447\u043d. \u0438\u043d\u0444., \u0431\u0440\u044e\u0448\u043d. \u0442\u0438\u0444; \u0413\u0435\u043b\u044c\u043c\u0438\u043d\u0442\u043e\u0437\u044b; \u0421\u0442\u0430\u0444\u0438\u043b."],
+      ["\u043f.24","\u0412\u043e\u0434\u043e\u043f\u0440\u043e\u0432\u043e\u0434\u043d. \u0441\u043e\u043e\u0440\u0443\u0436\u0435\u043d\u0438\u044f","\u0412\u0440\u0430\u0447-\u043e\u0442\u043e\u0440., \u0412\u0440\u0430\u0447-\u0434\u0435\u0440\u043c., \u0412\u0440\u0430\u0447-\u0441\u0442\u043e\u043c.","\u0421\u0438\u0444\u0438\u043b\u0438\u0441; \u0413\u0435\u043b\u044c\u043c\u0438\u043d\u0442\u043e\u0437\u044b"],
+      ["\u043f.25","\u0412\u043e\u0441\u043f\u0438\u0442. \u0438 \u043e\u0431\u0443\u0447. \u0434\u0435\u0442\u0435\u0439","\u0412\u0440\u0430\u0447-\u043e\u0442\u043e\u0440., \u0412\u0440\u0430\u0447-\u0434\u0435\u0440\u043c., \u0412\u0440\u0430\u0447-\u0441\u0442\u043e\u043c.","\u0421\u0438\u0444\u0438\u043b\u0438\u0441; \u0413\u043e\u043d\u043e\u0440\u0435\u044f; \u041a\u0438\u0448\u0435\u0447\u043d. \u0438\u043d\u0444., \u0431\u0440\u044e\u0448\u043d. \u0442\u0438\u0444; \u0413\u0435\u043b\u044c\u043c\u0438\u043d\u0442\u043e\u0437\u044b"],
+      ["\u043f.26","\u041a\u043e\u043c\u043c\u0443\u043d\u0430\u043b\u044c\u043d\u043e\u0435 \u043e\u0431\u0441\u043b\u0443\u0436\u0438\u0432\u0430\u043d\u0438\u0435","\u0412\u0440\u0430\u0447-\u043e\u0442\u043e\u0440., \u0412\u0440\u0430\u0447-\u0434\u0435\u0440\u043c., \u0412\u0440\u0430\u0447-\u0441\u0442\u043e\u043c.","\u0421\u0438\u0444\u0438\u043b\u0438\u0441; \u0413\u043e\u043d\u043e\u0440\u0435\u044f; \u041a\u0438\u0448\u0435\u0447\u043d. \u0438\u043d\u0444., \u0431\u0440\u044e\u0448\u043d. \u0442\u0438\u0444"],
+      ["\u043f.27","\u041c\u0435\u0434. \u043e\u0440\u0433\u0430\u043d\u0438\u0437\u0430\u0446\u0438\u0438","\u0412\u0440\u0430\u0447-\u043e\u0442\u043e\u0440., \u0412\u0440\u0430\u0447-\u0434\u0435\u0440\u043c., \u0412\u0440\u0430\u0447-\u0441\u0442\u043e\u043c.","\u0421\u0438\u0444\u0438\u043b\u0438\u0441; \u0413\u043e\u043d\u043e\u0440\u0435\u044f; \u041a\u0438\u0448\u0435\u0447\u043d. \u0438\u043d\u0444., \u0431\u0440\u044e\u0448\u043d. \u0442\u0438\u0444; \u0413\u0435\u043b\u044c\u043c\u0438\u043d\u0442\u043e\u0437\u044b"]
+    ]},
+    {sec:"I. \u0425\u0438\u043c. \u0444\u0430\u043a\u0442\u043e\u0440\u044b", items:[
+      ["\u043f.1.52.1","\u0410\u043d\u0442\u0438\u0431\u0438\u043e\u0442\u0438\u043a\u0438","\u0412\u0440\u0430\u0447-\u0434\u0435\u0440\u043c., \u0412\u0440\u0430\u0447-\u043e\u0442\u043e\u0440., \u0412\u0440\u0430\u0447-\u043e\u0444\u0442.","\u0421\u043f\u0438\u0440\u043e\u043c., \u0412\u0438\u0437\u043e\u043c., \u0411\u0438\u043e\u043c\u0438\u043a\u0440."],
+      ["\u043f.1.52.2","\u041f\u0440\u043e\u0442\u0438\u0432\u043e\u043e\u043f\u0443\u0445. \u043f\u0440\u0435\u043f\u0430\u0440\u0430\u0442\u044b","\u0412\u0440\u0430\u0447-\u0434\u0435\u0440\u043c., \u0412\u0440\u0430\u0447-\u043e\u0442\u043e\u0440., \u0412\u0440\u0430\u0447-\u043e\u0444\u0442.","\u0421\u043f\u0438\u0440\u043e\u043c., \u0412\u0438\u0437\u043e\u043c., \u0411\u0438\u043e\u043c\u0438\u043a\u0440."]
+    ]},
+    {sec:"II. \u0411\u0438\u043e\u043b. \u0444\u0430\u043a\u0442\u043e\u0440\u044b", items:[
+      ["\u043f.2.3","\u0410\u043b\u043b\u0435\u0440\u0433\u0435\u043d\u044b, \u043f\u0440\u0435\u043f. \u043a\u0440\u043e\u0432\u0438","\u0412\u0440\u0430\u0447-\u0434\u0435\u0440\u043c., \u0412\u0440\u0430\u0447-\u043e\u0442\u043e\u0440., \u0412\u0440\u0430\u0447-\u043e\u0444\u0442.","\u0421\u043f\u0438\u0440\u043e\u043c., \u0412\u0438\u0437\u043e\u043c., \u0411\u0438\u043e\u043c\u0438\u043a\u0440.; HBsAg, a-HBCOR, IgM, A-HCV-IgG, \u0412\u0418\u0427"],
+      ["\u043f.2.4.2","\u041f\u0430\u0442\u043e\u043c\u0438\u043a\u0440\u043e\u043e\u0440\u0433. II \u0433\u0440.","\u0412\u0440\u0430\u0447-\u0434\u0435\u0440\u043c., \u0412\u0440\u0430\u0447-\u043e\u0442\u043e\u0440., \u0412\u0440\u0430\u0447-\u043e\u0444\u0442.","HBs-Ag, \u0430\u043d\u0442\u0438-HBc-Ig, \u0430\u043d\u0442\u0438-HCV-Ig, \u0449\u0435\u043b. \u0444\u043e\u0441., \u0431\u0438\u043b., \u0410\u0421\u0422, \u0410\u041b\u0422, \u0412\u0418\u0427; \u0423\u0417\u0418 \u0431\u0440\u044e\u0448. \u043f\u043e\u043b."]
+    ]},
+    {sec:"IV. \u0424\u0438\u0437. \u0444\u0430\u043a\u0442\u043e\u0440\u044b + \u0422\u0440\u0443\u0434.", items:[
+      ["\u043f.4.1","\u0418\u043e\u043d\u0438\u0437. \u0438\u0437\u043b\u0443\u0447\u0435\u043d\u0438\u044f","\u0412\u0440\u0430\u0447-\u043e\u0444\u0442., \u0412\u0440\u0430\u0447-\u0434\u0435\u0440\u043c.","\u0420\u0435\u0442\u0438\u043a., \u0442\u0440\u043e\u043c\u0431.; \u041f\u0441\u0438\u0445\u043e\u0444\u0438\u0437.; \u0420\u0435\u0444\u0440\u0430\u043a\u0442\u043e\u043c., \u0411\u0438\u043e\u043c., \u0412\u0438\u0437\u043e\u043c., \u041e\u0444\u0442., \u0423\u0417\u0418 \u0431\u0440\u044e\u0448. \u043f\u043e\u043b. \u0438 \u0449\u0438\u0442. \u0436\u0435\u043b."],
+      ["\u043f.5.2.2","\u041d\u0430\u0433\u0440\u0443\u0437\u043a\u0430 \u043d\u0430 \u0433\u043e\u043b\u043e\u0441 >20\u0447/\u043d\u0435\u0434","\u0412\u0440\u0430\u0447-\u043e\u0442\u043e\u0440.","\u041d\u0435\u043f\u0440\u044f\u043c. \u043b\u0430\u0440\u0438\u043d\u0433\u043e\u0441\u043a\u043e\u043f\u0438\u044f"]
+    ]}
+  ];
+
+  var row = 2;
+  sections.forEach(function(sec) {
+    sh.getRange(row, 1, 1, 5).setValues([["", sec.sec, "", "", ""]]);
+    sh.getRange(row, 1, 1, 5).setFontWeight("bold").setBackground("#E8F0FE");
+    row++;
+    sec.items.forEach(function(item, i) {
+      sh.getRange(row, 1, 1, 5).setValues([[item[0], sec.sec, item[1], item[2], item[3]]]);
+      sh.getRange(row, 1).setFontWeight("bold");
+      if (i % 2 === 1) sh.getRange(row, 1, 1, 5).setBackground("#F8F9FA");
+      row++;
+    });
+  });
+
+  sh.setColumnWidth(1, 80);
+  sh.setColumnWidth(2, 160);
+  sh.setColumnWidth(3, 350);
+  sh.setColumnWidth(4, 350);
+  sh.setColumnWidth(5, 500);
+  sh.setFrozenRows(1);
+  sh.setFrozenColumns(1);
+
+  // Подсказка
+  sh.getRange(1, 1).setNote("\u0412\u044b \u043c\u043e\u0436\u0435\u0442\u0435 \u0434\u043e\u043f\u043e\u043b\u043d\u044f\u0442\u044c/\u0443\u0434\u0430\u043b\u044f\u0442\u044c \u0441\u0442\u0440\u043e\u043a\u0438. \u041f\u043e\u0441\u043b\u0435 \u0438\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0439 \u043d\u0430\u0436\u043c\u0438\u0442\u0435 \u00AB\u041f\u0435\u0440\u0435\u0441\u0447\u0438\u0442\u0430\u0442\u044c \u0444\u043e\u0440\u043c\u0443\u043b\u044b\u00BB.");
+}
+
+// =====================================================
+// ПЕРЕСЧЁТ ФОРМУЛ (читает справочник)
+// =====================================================
+function runFormulasOnly() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss) return;
+
+  // 1. Загружаем данные из справочника
+  loadRefData(ss);
+
+  // 2. Строим выпадающие списки по разделам
+  var lists = buildListsBySection();
+  var allSections = Object.keys(lists);
+
+  // 3. Обновляем формулы во всех листах
+  ss.getSheets().forEach(function(sh) {
+    var nm = sh.getName();
+    if (nm.indexOf("\u043e\u0431\u0443\u0447\u0435\u043d\u0438\u0435") !== -1) {
+      setTrainFormulas(sh);
+    }
+    if (nm.indexOf("\u043f\u0440\u043e\u0444 \u043e\u0441\u043c\u043e\u0442\u0440") !== -1) {
+      setExamFormulas(sh);
+      updateExamDropdowns(sh, lists, allSections);
+    }
+  });
+
+  SpreadsheetApp.getUi().alert("\u2705 \u0424\u043e\u0440\u043c\u0443\u043b\u044b \u043f\u0435\u0440\u0435\u0441\u0447\u0438\u0442\u0430\u043d\u044b \u0438\u0437 \u0441\u043f\u0440\u0430\u0432\u043e\u0447\u043d\u0438\u043a\u0430!");
+}
+
+// =====================================================
+// СОЗДАНИЕ СТРУКТУРЫ
+// =====================================================
+function runCreate() {
+  var ui = SpreadsheetApp.getUi();
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss) { ui.alert("\u274c \u0417\u0430\u043f\u0443\u0441\u0442\u0438\u0442\u0435 \u0438\u0437 \u043c\u0435\u043d\u044e \u0442\u0430\u0431\u043b\u0438\u0446\u044b."); return; }
+
+  ui.alert("\u0421\u043e\u0437\u0434\u0430\u043d\u0438\u0435...", "\u0411\u0443\u0434\u0435\u0442 \u0441\u043e\u0437\u0434\u0430\u043d\u043e 7 \u043b\u0438\u0441\u0442\u043e\u0432.\n\u0421\u0443\u0449\u0435\u0441\u0442\u0432\u0443\u044e\u0449\u0438\u0435 \u0434\u0430\u043d\u043d\u044b\u0435 \u0421\u041e\u0425\u0420\u0410\u041d\u042f\u042e\u0422\u0421\u042f.", ui.ButtonSet.OK);
+
+  createRef(ss);
+  NM_LOCS.forEach(function(l) { createTrain(ss, l); });
+  NM_LOCS.forEach(function(l) { createExam(ss, l); });
+  addTriggerSafe(ss);
+
+  // Загружаем данные и пересчитываем
+  loadRefData(ss);
+  var lists = buildListsBySection();
+  var allSections = Object.keys(lists);
+  ss.getSheets().forEach(function(sh) {
+    var nm = sh.getName();
+    if (nm.indexOf("\u043f\u0440\u043e\u0444 \u043e\u0441\u043c\u043e\u0442\u0440") !== -1) {
+      updateExamDropdowns(sh, lists, allSections);
+    }
+  });
+
+  ss.setActiveSheet(ss.getSheetByName(NM_REF));
+  ui.alert("\u2705 \u0413\u043e\u0442\u043e\u0432\u043e!");
+}
+
+// =====================================================
+// ОБУЧЕНИЕ
+// =====================================================
+function createTrain(ss, loc) {
+  var sh = ensureSheet(ss, loc + " \u043e\u0431\u0443\u0447\u0435\u043d\u0438\u0435");
+  sh.setTabColor("#4285F4");
+  ensureHeaders(sh, TH);
+  [200,150,120,60,150,120,150,200,120,110,130,170,320,130,280].forEach(function(v,i){sh.setColumnWidth(i+1,v);});
+  sh.getRange("D2:D51").setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(["0.25","0.5","0.75","1.0"]).setAllowInvalid(false).build());
+  sh.getRange("C2:C51").setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(["\u041e\u0441\u043d\u043e\u0432\u043d\u043e\u0435 \u043c\u0435\u0441\u0442\u043e \u0440\u0430\u0431\u043e\u0442\u044b","\u0421\u043e\u0432\u043c\u0435\u0441\u0442\u0438\u0442\u0435\u043b\u044c"]).setAllowInvalid(false).build());
+  sh.getRange("J2:J51").setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(["\u041f\u0435\u0440\u0432\u0438\u0447\u043d\u0430\u044f","\u041f\u0435\u0440\u0438\u043e\u0434\u0438\u0447\u0435\u0441\u043a\u0430\u044f"]).setAllowInvalid(false).build());
+  setTrainFormulas(sh);
+  setTrainCondFmt(sh);
+  sh.setFrozenRows(1); sh.setFrozenColumns(2);
+}
+
+function setTrainFormulas(sh) {
+  for (var r = 2; r <= 51; r++) {
+    putFormula(sh.getRange(r, 11), "=IF(I" + r + "=\"\";\"\";DATE(YEAR(I" + r + ")+5;MONTH(I" + r + ");DAY(I" + r + ")))");
+    putFormula(sh.getRange(r, 12), "=IF(K" + r + "=\"\";\"\";IF(K" + r + "<TODAY();" + q() + "\u041f\u0420\u041e\u0421\u0420\u041e\u0427\u0415\u041d\u043e" + q() + ";CONCATENATE(" + q() + "\u041e\u0441\u0442\u0430\u043b\u043e\u0441\u044c " + q() + ";DATEDIF(TODAY();K" + r + ";" + q() + "Y" + q() + ");" + q() + " \u043b\u0435\u0442 " + q() + ";DATEDIF(TODAY();K" + r + ";" + q() + "YM" + q() + ");" + q() + " \u043c\u0435\u0441 " + q() + ";DATEDIF(TODAY();K" + r + ";" + q() + "MD" + q() + ");" + q() + " \u0434\u043d." + q() + ")))");
+    putFormula(sh.getRange(r,13),"=IF(AND(K"+r+"<>\"\";K"+r+"<=TODAY()+2);CONCATENATE(\"С \";TEXT(K"+r+";\"ДД.ММ.ГГГГ\");\" необходимо отправить в отпуск\");\"\")");
+    putFormula(sh.getRange(r, 15), "=IF(N" + r + "<>" + q() + q() + ";IF(N" + r + "<TODAY();CONCATENATE(" + q() + "\u041f\u0420\u041e\u0421\u0420\u041e\u0427\u0415\u041d\u043e: " + q() + ";TEXT(N" + r + ";" + q() + "DD.MM.YYYY" + q() + "));CONCATENATE(" + q() + "\u041f\u043b\u0430\u043d: " + q() + ";TEXT(N" + r + ";" + q() + "DD.MM.YYYY" + q() + ");" + q() + " (\u043e\u0441\u0442\u0430\u043b\u043e\u0441\u044c " + q() + ";DATEDIF(TODAY();N" + r + ";" + q() + "Y" + q() + ");" + q() + " \u043b\u0435\u0442 " + q() + ";DATEDIF(TODAY();N" + r + ";" + q() + "YM" + q() + ");" + q() + " \u043c\u0435\u0441)" + q() + "));IF(F" + r + "=" + q() + q() + ";" + q() + q() + ";CONCATENATE(" + q() + "\u041d\u0435 \u0437\u0430\u043f\u043b\u0430\u043d\u0438\u0440\u043e\u0432\u0430\u043d\u043e. \u041f\u0440\u043e\u0448\u043b\u043e " + q() + ";DATEDIF(F" + r + ";TODAY();" + q() + "Y" + q() + ");" + q() + " \u043b\u0435\u0442 " + q() + ";DATEDIF(F" + r + ";TODAY();" + q() + "YM" + q() + ");" + q() + " \u043c\u0435\u0441 \u0438\u0437 5." + q() + ")))");
+    sh.getRange(r, 6).setNumberFormat("DD.MM.YYYY");
+    sh.getRange(r, 9).setNumberFormat("DD.MM.YYYY");
+    sh.getRange(r, 14).setNumberFormat("DD.MM.YYYY");
+  }
+}
+
+function setTrainCondFmt(sh) {
+  try {
+    var rules = [];
+    rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied("=AND($K2<>\"\";$K2<TODAY())").setFontColor("#CC0000").setBold(true).setRanges([sh.getRange("K2:K51")]).build());
+    rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied("=AND($K2<>\"\";$K2>=TODAY();$K2<=TODAY()+122)").setBackground("#F4CCCC").setFontColor("#CC0000").setRanges([sh.getRange("K2:K51")]).build());
+    rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied("=AND($K2<>\"\";$K2>TODAY()+122;$K2<=TODAY()+365)").setBackground("#FFF2CC").setRanges([sh.getRange("K2:K51")]).build());
+    rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied("=LEN($M2)>0").setBackground("#FFF2CC").setFontColor("#CC0000").setRanges([sh.getRange("M2:M51")]).build());
+    sh.setConditionalFormatRules(rules);
+  } catch(e) {}
+}
+
+// =====================================================
+// ПРОФОСМОТР
+// =====================================================
+function createExam(ss, loc) {
+  var sh = ensureSheet(ss, loc + " \u043f\u0440\u043e\u0444 \u043e\u0441\u043c\u043e\u0442\u0440");
+  sh.setTabColor("#EA4335");
+  var pL = EH.length, vL = EV.length, dL = ED.length, kL = EP.length, rL = ER.length;
+  var vS = pL + 1, dS = vS + vL, kS = dS + dL, rS = kS + kL;
+
+  if (sh.getRange(1, 1).getValue() === "") {
+    var all = EH.concat(EV).concat(ED).concat(EP).concat(ER);
+    sh.getRange(1, 1, 1, all.length).setValues([all]);
+    sh.getRange(1, 1, 1, all.length).setFontWeight("bold").setFontColor("#fff").setWrap(true).setHorizontalAlignment("center").setVerticalAlignment("middle");
+    sh.setRowHeight(1, 65);
+    sh.getRange(1, 1, 1, pL).setBackground("#34A853");
+    sh.getRange(1, vS, 1, vL).setBackground("#EA8600");
+    sh.getRange(1, dS, 1, dL).setBackground("#A142F4");
+    sh.getRange(1, kS, 1, kL).setBackground("#EA4335");
+    sh.getRange(1, rS, 1, rL).setBackground("#1A73E8");
+  }
+
+  sh.setColumnWidth(1, 200); sh.setColumnWidth(2, 110); sh.setColumnWidth(3, 55);
+  sh.setColumnWidth(4, 130); sh.setColumnWidth(5, 200); sh.setColumnWidth(6, 35);
+  sh.setColumnWidth(7, 150); sh.setColumnWidth(8, 120);
+  for (var v = 0; v < vL; v++) sh.setColumnWidth(vS + v, 105);
+  sh.setColumnWidth(dS, 120); sh.setColumnWidth(dS + 1, 130); sh.setColumnWidth(dS + 2, 160);
+  for (var p = 0; p < kL; p++) sh.setColumnWidth(kS + p, 250);
+  sh.setColumnWidth(rS, 350); sh.setColumnWidth(rS + 1, 600);
+
+  sh.getRange("F2:F51").setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(["\u041c", "\u0416"]).setAllowInvalid(false).build());
+  sh.getRange("H2:H51").setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(["\u041e\u0441\u043d\u043e\u0432\u043d\u043e\u0435 \u043c\u0435\u0441\u0442\u043e \u0440\u0430\u0431\u043e\u0442\u044b", "\u0421\u043e\u0432\u043c\u0435\u0441\u0442\u0438\u0442\u0435\u043b\u044c"]).setAllowInvalid(false).build());
+
+  sh.getRange(1, vS + 2).setNote("\u041a\u0440\u0430\u0441\u043d\u0443\u0445\u0430: \u0442\u043e\u043b\u044c\u043a\u043e \u0434\u043b\u044f \u0436\u0435\u043d\u0449. \u0434\u043e 35 \u043b\u0435\u0442.");
+  sh.getRange(1, kS).setNote("1-\u0439 \u0441\u043f\u0438\u0441\u043e\u043a: \u0412\u044b\u043f. \u0440\u0430\u0431\u043e\u0442\u044b. 2-\u0439: \u0425\u0438\u043c. \u0444\u0430\u043a\u0442\u043e\u0440\u044b. 3-\u0439: \u0411\u0438\u043e\u043b. \u0444\u0430\u043a\u0442\u043e\u0440\u044b. 4-\u0439: \u0424\u0438\u0437.+\u0422\u0440\u0443\u0434.");
+
+  setExamFormulas(sh);
+  setExamCondFmt(sh);
+  sh.setFrozenRows(1); sh.setFrozenColumns(2);
+}
+
+// =====================================================
+// ФОРМУЛЫ ПРОФОСМОТРА — dS = pL+vL+1 = 18
+// =====================================================
+function setExamFormulas(sh) {
+  var pL = EH.length, vL = EV.length;
+  var dS = pL + vL + 1; // = 18
+  for (var r = 2; r <= 51; r++) {
+    putFormula(sh.getRange(r, 3), "=IF(B" + r + "=\"\";\"\";DATEDIF(B" + r + ";TODAY();" + q() + "Y" + q() + "))");
+    putFormula(sh.getRange(r, dS + 1), "=IF(R" + r + "=\"\";\"\";DATE(YEAR(R" + r + ")+1;MONTH(R" + r + ");DAY(R" + r + ")))");
+    sh.getRange(r, dS + 1).setNumberFormat("DD.MM.YYYY");
+    putFormula(sh.getRange(r, dS + 2), "=IF(S" + r + "=\"\";\"\";IF(S" + r + "<TODAY();" + q() + "\u041f\u0420\u041e\u0421\u0420\u041e\u0427\u0415\u041d\u043e" + q() + ";CONCATENATE(" + q() + "\u041e\u0441\u0442\u0430\u043b\u043e\u0441\u044c " + q() + ";DATEDIF(TODAY();S" + r + ";" + q() + "Y" + q() + ");" + q() + " \u043b\u0435\u0442 " + q() + ";DATEDIF(TODAY();S" + r + ";" + q() + "YM" + q() + ");" + q() + " \u043c\u0435\u0441 " + q() + ";DATEDIF(TODAY();S" + r + ";" + q() + "MD" + q() + ");" + q() + " \u0434\u043d." + q() + ")))");
+    sh.getRange(r, 2).setNumberFormat("DD.MM.YYYY");
+    for (var v = 0; v < vL; v++) sh.getRange(r, 9 + v).setNumberFormat("DD.MM.YYYY");
+    sh.getRange(r, 18).setNumberFormat("DD.MM.YYYY");
+  }
+}
+
+function setExamCondFmt(sh) {
+  try {
+    var rules = [];
+    rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied("=AND($S2<>\"\";$S2<TODAY())").setFontColor("#CC0000").setBold(true).setRanges([sh.getRange("S2:S51")]).build());
+    rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied("=AND($S2<>\"\";$S2>=TODAY();$S2<=TODAY()+122)").setBackground("#F4CCCC").setFontColor("#CC0000").setRanges([sh.getRange("S2:S51")]).build());
+    rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied("=AND($S2<>\"\";$S2>TODAY()+122;$S2<=TODAY()+244)").setBackground("#FFF2CC").setRanges([sh.getRange("S2:S51")]).build());
+    sh.setConditionalFormatRules(rules);
+  } catch(e) {}
+}
+
+// =====================================================
+// ОБНОВЛЕНИЕ ВЫПАДАЮЩИХ СПИСКОВ (из справочника)
+// =====================================================
+function updateExamDropdowns(sh, lists, sections) {
+  var pL = EH.length, vL = EV.length, dL = ED.length;
+  var kS = pL + vL + dL + 1; // = 21
+
+  // Собираем все значения из всех разделов для combined списка
+  var allItems = [];
+  sections.forEach(function(sec) {
+    if (lists[sec]) {
+      lists[sec].forEach(function(item) { allItems.push(item); });
+    }
+  });
+
+  // Устанавливаем выпадающие списки для каждой колонки
+  for (var p = 0; p < 4; p++) {
+    // Используем общий список для всех колонок, но с приоритетом раздела
+    sh.getRange(2, kS + p, 50, 1).setDataValidation(
+      SpreadsheetApp.newDataValidation().requireValueInList(allItems).setAllowInvalid(true).build()
+    );
+  }
+}
+
+// =====================================================
+// ТРИГГЕР + ONEDIT
+// =====================================================
+function addTriggerSafe(ss) {
+  try {
+    ScriptApp.getProjectTriggers().forEach(function(t) {
+      if (t.getHandlerFunction() === "onEditHook") {
+        try { ScriptApp.deleteTrigger(t); } catch(e2) {}
+      }
+    });
+    ScriptApp.newTrigger("onEditHook").forSpreadsheet(ss).onEdit().create();
+  } catch(e) { Logger.log("Trigger: " + e); }
+}
+
+function onEditHook(e) {
+  try {
+    if (!e || !e.range) return;
+    var sh = e.source.getActiveSheet();
+    if (!sh) return;
+    var nm = sh.getName(), row = e.range.getRow(), col = e.range.getColumn();
+    if (nm.indexOf("\u043f\u0440\u043e\u0444 \u043e\u0441\u043c\u043e\u0442\u0440") !== -1) {
+      if ((col >= 21 && col <= 24) || col === 6 || col === 2) doRefresh(sh, row, 21, 25);
+    }
+    if (nm.indexOf("\u043e\u0431\u0443\u0447\u0435\u043d\u0438\u0435") !== -1 && col === 6) {
+      sh.getRange(row, 14).setValue("");
+    }
+  } catch(e) {}
+}
+
+// =====================================================
+// ОБНОВЛЕНИЕ СПЕЦИАЛИСТОВ И ИССЛЕДОВАНИЙ (из справочника)
+// =====================================================
+function doRefresh(sh, row, pktS, resS) {
+  try {
+    var age = sh.getRange(row, 3).getValue();
+    var gender = sh.getRange(row, 6).getValue();
+    var hasAge = (age !== "" && age !== null && !isNaN(age));
+    var specs = [], tests = [];
+
+    // Читаем пункты из 4 колонок
+    for (var p = 0; p < 4; p++) {
+      var val = sh.getRange(row, pktS + p).getValue();
+      if (!val || val === "") continue;
+
+      // Ищем в _pktCache (загружен из справочника)
+      var pk = _pktCache.find(function(x) { return (x.code + " " + x.name) === val; });
+      if (!pk) continue;
+
+      if (pk.spec) pk.spec.split(", ").forEach(function(s) { if (specs.indexOf(s) === -1) specs.push(s); });
+      if (pk.tests) pk.tests.split("; ").forEach(function(t) {
+        var tr = t.replace(/^\s+|\s+$/g, "");
+        if (tr && tests.indexOf(tr) === -1) tests.push(tr);
+      });
+    }
+
+    // Базовые исследования (неизменяемые)
+    BASE.forEach(function(item) {
+      if (hasAge) {
+        if (item[4] > 0 && age < item[4]) return;
+        if (item[5] > 0 && age > item[5]) return;
+      }
+      if (item[6] !== "\u0412\u0441\u0435" && gender !== item[6]) return;
+      if (item[1] && specs.indexOf(item[1]) === -1) specs.push(item[1]);
+      if (item[2]) item[2].split(", ").forEach(function(t) {
+        var tr = t.replace(/^\s+|\s+$/g, "");
+        if (tr && tests.indexOf(tr) === -1) tests.push(tr);
+      });
+    });
+
+    sh.getRange(row, resS).setValue(specs.join("\n"));
+    sh.getRange(row, resS + 1).setValue(tests.join("\n"));
+  } catch(e) { Logger.log("doRefresh: " + e); }
+}
+
+// =====================================================
+// УТИЛИТЫ
+// =====================================================
+function q() { return String.fromCharCode(34); }
+
+function toggleRef() {
+  try {
+    var sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(NM_REF);
+    if (sh) sh.isSheetHidden() ? sh.showSheet() : sh.hideSheet();
+  } catch(e) {}
+}
